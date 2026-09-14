@@ -2579,8 +2579,8 @@ impl App {
                 params,
             } => {
                 // Per-WT-event (every vt_sequence included) — trace-only; the
-                // single per-event breadcrumb stays at debug in main.rs
-                // (`wt_event_rx: received event`).
+                // receipt log in helper/runtime.rs uses DEBUG with the full
+                // envelope in Debug builds, or INFO with method only in Release.
                 tracing::trace!(target: "autofix", method = %method, pane_id = %pane_id, tab_id = ?tab_id, self_pane_id = ?self.pane_id, "WtEvent");
 
                 if method == "fre_auto_install_selected_agent" {
