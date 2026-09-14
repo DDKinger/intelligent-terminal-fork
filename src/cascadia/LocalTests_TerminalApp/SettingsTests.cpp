@@ -2271,6 +2271,8 @@ namespace TerminalAppLocalTests
         };
         auto hostCodex = hostCopilot;
         hostCodex.agentId = L"codex";
+        VERIFY_IS_TRUE(Page::_IsSameAgentPaneBackend(hostCopilot, hostCopilot));
+        VERIFY_IS_FALSE(Page::_IsSameAgentPaneBackend(hostCopilot, hostCodex));
         VERIFY_IS_TRUE(Page::_CanSwitchAgentInPlace(hostCopilot, hostCodex, State::Connecting, true));
         VERIFY_IS_TRUE(Page::_CanSwitchAgentInPlace(hostCopilot, hostCodex, State::Connected, true));
         VERIFY_IS_FALSE(Page::_CanSwitchAgentInPlace(hostCopilot, hostCodex, State::Connected, false));
@@ -2281,11 +2283,14 @@ namespace TerminalAppLocalTests
         wslCopilot.agentWslDistro = L"Ubuntu";
         auto wslCodex = wslCopilot;
         wslCodex.agentId = L"codex";
+        VERIFY_IS_FALSE(Page::_IsSameAgentPaneBackend(hostCopilot, wslCopilot));
+        VERIFY_IS_FALSE(Page::_IsSameAgentPaneBackend(wslCopilot, wslCodex));
         VERIFY_IS_TRUE(Page::_CanSwitchAgentInPlace(wslCopilot, wslCodex, State::Connected, true));
         VERIFY_IS_FALSE(Page::_CanSwitchAgentInPlace(hostCopilot, wslCodex, State::Connected, true));
 
         auto otherDistro = wslCodex;
         otherDistro.agentWslDistro = L"Debian";
+        VERIFY_IS_FALSE(Page::_IsSameAgentPaneBackend(wslCopilot, otherDistro));
         VERIFY_IS_FALSE(Page::_CanSwitchAgentInPlace(wslCopilot, otherDistro, State::Connected, true));
 
         auto customAgent = hostCopilot;
@@ -2353,6 +2358,7 @@ namespace TerminalAppLocalTests
 
         Page::AgentPaneSettingsBinding globalFollower;
         globalFollower.agentId = L"gemini";
+        globalFollower.followsGlobalAgent = true;
         globalFollower.followsGlobalAcpModel = true;
         VERIFY_IS_FALSE(Page::_ResolveHotAutomaticYoloForAgentBinding(
             previous, current, globalFollower, L"copilot"));
@@ -2387,7 +2393,52 @@ namespace TerminalAppLocalTests
             .globalAgentId = L"copilot",
             .globalModel = L"gpt-5.6",
         });
+        Request sameAgentOverrideRequest{
+            .hasAgentOverride = true,
+            .agentIdOverride = L"copilot",
+            .agentSourceOverride = L"host",
+            .globalAgentId = L"copilot",
+            .globalModel = L"gpt-5.6",
+            .globalAgentCliPath = L"copilot --acp --stdio --model gpt-5.6",
+        };
+        const auto sameAgentOverride = Page::_ResolveAgentPaneSettingsBinding(sameAgentOverrideRequest);
         using State = winrt::Microsoft::Terminal::TerminalConnection::ConnectionState;
+
+        VERIFY_IS_FALSE(sameAgentOverride.followsGlobalAgent);
+        VERIFY_IS_TRUE(sameAgentOverride.followsGlobalAcpModel);
+        VERIFY_ARE_EQUAL(std::wstring{ L"gpt-5.6" }, sameAgentOverride.acpModel);
+        VERIFY_IS_TRUE(Page::_IsAgentPaneModelHotUpdateTarget(sameAgentOverride, State::Connected, true, true));
+        VERIFY_IS_TRUE(Page::_IsAgentPaneSettingsRebindAffected(sameAgentOverride, false, true, false));
+        VERIFY_IS_FALSE(Page::_IsAgentPaneSettingsRebindAffected(sameAgentOverride, true, false, false));
+        const auto firstTarget = Page::_BuildAgentPaneModelHotUpdatePayload(sameAgentOverride, L"restored-tab-a", L"window-1");
+        const auto secondTarget = Page::_BuildAgentPaneModelHotUpdatePayload(sameAgentOverride, L"restored-tab-b", L"window-1");
+        VERIFY_ARE_EQUAL(std::string{ "restored-tab-a" }, firstTarget["tab_id"].asString());
+        VERIFY_ARE_EQUAL(std::string{ "restored-tab-b" }, secondTarget["tab_id"].asString());
+        VERIFY_ARE_EQUAL(std::string{ "window-1" }, firstTarget["window_id"].asString());
+        VERIFY_ARE_EQUAL(std::string{ "copilot" }, firstTarget["target_agent_id"].asString());
+        VERIFY_ARE_EQUAL(std::string{ "gpt-5.6" }, firstTarget["acp_model"].asString());
+        VERIFY_IS_TRUE(firstTarget["follows_global_acp_model"].asBool());
+        VERIFY_IS_TRUE(Page::_BuildAgentPaneSettingsRebindPayload(sameAgentOverride)["follows_global_acp_model"].asBool());
+
+        auto scopedRequest = sameAgentOverrideRequest;
+        scopedRequest.agentModelOverride = L"gpt-5.5";
+        VERIFY_IS_FALSE(Page::_ResolveAgentPaneSettingsBinding(scopedRequest).followsGlobalAcpModel);
+        scopedRequest = sameAgentOverrideRequest;
+        scopedRequest.globalAgentId = L"claude";
+        VERIFY_IS_FALSE(Page::_ResolveAgentPaneSettingsBinding(scopedRequest).followsGlobalAcpModel);
+        scopedRequest = sameAgentOverrideRequest;
+        scopedRequest.agentSourceOverride = L"wsl";
+        scopedRequest.agentWslDistroOverride = L"Ubuntu";
+        VERIFY_IS_FALSE(Page::_ResolveAgentPaneSettingsBinding(scopedRequest).followsGlobalAcpModel);
+        scopedRequest = sameAgentOverrideRequest;
+        scopedRequest.hasAgentOverride = false;
+        scopedRequest.profileBackend = L"host:copilot";
+        VERIFY_IS_FALSE(Page::_ResolveAgentPaneSettingsBinding(scopedRequest).followsGlobalAcpModel);
+        scopedRequest = sameAgentOverrideRequest;
+        scopedRequest.agentIdOverride = L"custom:local";
+        scopedRequest.globalAgentId = L"custom:local";
+        scopedRequest.agentCustomCommandOverride = L"custom-agent --acp";
+        VERIFY_IS_FALSE(Page::_ResolveAgentPaneSettingsBinding(scopedRequest).followsGlobalAcpModel);
 
         VERIFY_IS_TRUE(Page::_IsAgentPaneModelHotUpdateTarget(globalFollower, State::Connected, true, true));
         VERIFY_IS_FALSE(Page::_ShouldRecreateAgentPaneForModelHotUpdate(globalFollower, State::Connected, true, true));

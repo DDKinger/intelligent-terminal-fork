@@ -18,6 +18,7 @@
 #include "../TerminalApp/TerminalSettingsCache.h"
 #include "../TerminalApp/TerminalPaneContent.h"
 #include "../inc/AgentPaneRestore.h"
+#include "../inc/AgentPaneBackend.h"
 #include "../UnitTests_Control/MockControlSettings.h"
 #include "CppWinrtTailored.h"
 
@@ -227,6 +228,9 @@ namespace TerminalAppLocalTests
         winrt::hstring agentCustomCommand{ L"\"C:\\Test Tools\\custom-agent.exe\" --acp" };
         winrt::hstring agentRestoreCommandline;
         bool hidden{};
+        winrt::TerminalApp::implementation::Tab::AgentOverrideOrigin agentOverrideOrigin{
+            winrt::TerminalApp::implementation::Tab::AgentOverrideOrigin::User
+        };
         std::vector<winrt::com_ptr<TestConnection>> connections;
         std::shared_ptr<std::vector<Json::Value>> events{ std::make_shared<std::vector<Json::Value>>() };
     };
@@ -270,6 +274,8 @@ namespace TerminalAppLocalTests
         TEST_METHOD(PaneContextPropagatesCaptureFailure);
         TEST_METHOD(AgentSessionRestoreRequiresPersistedBufferPath);
         TEST_METHOD(AgentPaneRestoreRecordRoundTrips);
+        TEST_METHOD(AgentPaneRestorePreservesSettingsBinding);
+        TEST_METHOD(RestoredAgentSelectionBecomesExplicitOnlyAfterUserChoice);
         TEST_METHOD(PersistedLayoutAgentSessionsReceiveRestorePaths);
         TEST_METHOD(PaneAgentSessionBindingRequiresPaneIdentity);
         TEST_METHOD(AgentPaneRestoreDoesNotRequireAgentSession);
@@ -322,6 +328,7 @@ namespace TerminalAppLocalTests
         TEST_METHOD(ContentTransferReviewHiddenZoomedTabMovesToExistingPage);
         TEST_METHOD(ContentTransferReviewHiddenZoomedTabMovesToFreshReceiver);
         TEST_METHOD(ContentTransferReviewHiddenTabMovesWithoutZoom);
+        TEST_METHOD(ContentTransferRestoredAgentBindingKeepsOrigin);
         TEST_METHOD(ContentTransferReviewVisibleZoomedTabMoves);
         TEST_METHOD(ContentTransferReviewHiddenZoomedNestedTabKeepsFinalFocus);
         TEST_METHOD(ContentTransferReviewRollbackPreservesScrollOffset);
@@ -377,7 +384,7 @@ namespace TerminalAppLocalTests
         using TransferStage = winrt::TerminalApp::implementation::TerminalPage::ContentTransferStage;
         static winrt::TerminalApp::implementation::SharedWtaLease _acquireIsolatedAgentLease();
         std::unique_ptr<ContentTransferFixture> _createContentTransferFixture(bool agentFirst, bool hidden, bool freshReceiver = false, bool twoLeaves = false, std::optional<int32_t> historySize = std::nullopt);
-        void _verifyContentTransferReviewZoom(bool hidden, bool zoomed, bool freshReceiver, bool twoLeaves = true);
+        void _verifyContentTransferReviewZoom(bool hidden, bool zoomed, bool freshReceiver, bool twoLeaves = true, bool restoredAgent = false);
         void _verifyContentTransferReviewScroll(bool transfer, bool reject = true);
         void _verifyContentTransferReviewSuppression(bool singlePane, bool destinationSuppressed = false);
         void _waitForContentTransferReviewUI(const std::function<bool()>& predicate);
@@ -563,6 +570,7 @@ namespace TerminalAppLocalTests
         written.yoloControlOwner = L"manual";
 
         const auto commandline = Restore::BuildPaneCommandline(LR"(C:\Program Files\wta.exe)", written);
+        VERIFY_IS_TRUE(commandline.find(L"--agent-override") == std::wstring::npos);
 
         auto argc = 0;
         const wil::unique_hlocal_ptr<PWSTR[]> argv{ ::CommandLineToArgvW(commandline.c_str(), &argc) };
@@ -589,6 +597,132 @@ namespace TerminalAppLocalTests
         VERIFY_IS_TRUE(sparseCmd.find(Restore::ViewFlag) == std::wstring::npos);
         VERIFY_IS_TRUE(sparseCmd.find(Restore::CustomCommandFlag) == std::wstring::npos);
         VERIFY_IS_TRUE(sparseCmd.find(Restore::YoloControlOwnerFlag) == std::wstring::npos);
+    }
+
+    void TabTests::AgentPaneRestorePreservesSettingsBinding()
+    {
+        namespace Restore = ::Microsoft::Terminal::AgentPaneRestore;
+        using State = winrt::Microsoft::Terminal::TerminalConnection::ConnectionState;
+
+        auto page = _commonSetup();
+        VERIFY_IS_NOT_NULL(page);
+        TestOnUIThread([&]() {
+            const auto tab = page->_GetFocusedTabImpl();
+            const auto globals = page->_settings.GlobalSettings();
+            const auto profile = page->_ResolveAgentSourceProfile(tab, page->_settings);
+            VERIFY_IS_NOT_NULL(profile);
+            tab->SuppressAgentPrewarm();
+
+            struct Case
+            {
+                const wchar_t* name;
+                const wchar_t* globalAgent;
+                const wchar_t* profileBackend;
+                const wchar_t* savedAgent;
+                const wchar_t* savedCustomCommand;
+                bool expectedOverride;
+                bool expectedGlobalFollower;
+            };
+            const Case cases[]{
+                { L"global follower", L"copilot", L"", L"copilot", L"", false, true },
+                { L"changed global agent initially keeps session owner", L"claude", L"", L"copilot", L"", true, false },
+                { L"profile backend remains profile-bound", L"copilot", L"host:copilot", L"copilot", L"", false, false },
+                { L"WSL profile remains profile-bound", L"copilot", L"wsl:Ubuntu:copilot", L"wsl:Ubuntu:copilot", L"", false, false },
+                { L"changed WSL distro initially keeps session owner", L"copilot", L"wsl:Debian:copilot", L"wsl:Ubuntu:copilot", L"", true, false },
+                { L"restored WSL owner differs from global Host", L"copilot", L"", L"wsl:Ubuntu:copilot", L"", true, false },
+                { L"custom global follower", L"custom:restore-test", L"", L"custom:restore-test", L"custom-agent --acp", false, true },
+                { L"changed custom command initially keeps session owner", L"custom:restore-test", L"", L"custom:restore-test", L"old-agent --acp", true, false },
+            };
+
+            for (const auto& test : cases)
+            {
+                Log::Comment(test.name);
+                tab->ClearAgentOverride();
+                globals.AcpAgent(test.globalAgent);
+                globals.AcpModel(L"new-settings-model");
+                globals.AcpCustomCommand(test.globalAgent == std::wstring_view{ L"custom:restore-test" } ? L"custom-agent --acp" : L"");
+                profile.AgentPaneBackend(test.profileBackend);
+
+                Restore::Fields fields;
+                fields.sessionId = L"restored-session";
+                fields.view = Restore::ChatView;
+                fields.agentIdentity = test.savedAgent;
+                fields.customCommand = test.savedCustomCommand;
+                NewTerminalArgs args;
+                args.SetContentType(winrt::hstring{ Restore::StashedPaneType });
+                args.Commandline(winrt::hstring{ Restore::BuildPaneCommandline(L"wta.exe", fields) });
+
+                // Stop at the existing prewarm gate after applying the real
+                // restore binding, without launching a helper or agent CLI.
+                VERIFY_IS_FALSE(page->_RestoreAgentPaneFromLayout(tab, args, SplitDirection::Automatic, 0.5f));
+                VERIFY_ARE_EQUAL(test.expectedOverride, tab->HasAgentOverride());
+                VERIFY_ARE_EQUAL(test.expectedOverride, tab->HasRestoredAgentOverride());
+                VERIFY_IS_FALSE(tab->HasExplicitAgentOverride());
+                VERIFY_ARE_EQUAL(winrt::hstring{ test.savedAgent }, page->_GetAgentPaneIdentity(tab.get()));
+                VERIFY_ARE_EQUAL(winrt::hstring{ test.savedCustomCommand }, page->_GetAgentPaneCustomCommand(tab.get()));
+
+                const auto binding = page->_ResolveAgentPaneSettingsBindingForTab(tab);
+                VERIFY_ARE_EQUAL(!test.expectedOverride && std::wstring_view{ test.profileBackend }.empty(), binding.followsGlobalAgent);
+                VERIFY_ARE_EQUAL(test.expectedGlobalFollower, binding.followsGlobalAcpModel);
+                VERIFY_ARE_EQUAL(
+                    test.expectedGlobalFollower,
+                    page->_IsAgentPaneModelHotUpdateTarget(binding, State::Connected, true, true));
+                if (test.expectedGlobalFollower)
+                {
+                    VERIFY_ARE_EQUAL(std::wstring{ L"new-settings-model" }, binding.acpModel);
+                }
+
+                globals.AcpModel(L"later-settings-model");
+                const auto settingsBinding = page->_ResolveAgentPaneSettingsBindingForTab(tab, true);
+                const auto profileBackend = ::Microsoft::Terminal::Settings::Model::AgentPaneBackend::Parse(test.profileBackend);
+                VERIFY_ARE_EQUAL(!profileBackend.has_value(), settingsBinding.followsGlobalAgent);
+                VERIFY_ARE_EQUAL(!profileBackend.has_value(), settingsBinding.followsGlobalAcpModel);
+                VERIFY_ARE_EQUAL(
+                    profileBackend ? profileBackend->agentId : std::wstring{ test.globalAgent },
+                    settingsBinding.agentId);
+                VERIFY_ARE_EQUAL(
+                    profileBackend && profileBackend->source == ::Microsoft::Terminal::Settings::Model::AgentPaneBackendSource::Wsl ?
+                        std::wstring{ L"wsl" } :
+                        std::wstring{ L"host" },
+                    settingsBinding.agentSource);
+                if (!profileBackend)
+                {
+                    VERIFY_ARE_EQUAL(std::wstring{ L"later-settings-model" }, settingsBinding.acpModel);
+                }
+                VERIFY_ARE_EQUAL(winrt::hstring{ test.savedAgent }, page->_GetAgentPaneIdentity(tab.get()));
+                VERIFY_ARE_EQUAL(test.expectedOverride, tab->HasRestoredAgentOverride());
+            }
+        });
+    }
+
+    void TabTests::RestoredAgentSelectionBecomesExplicitOnlyAfterUserChoice()
+    {
+        using Tab = winrt::TerminalApp::implementation::Tab;
+        auto page = _commonSetup();
+        TestOnUIThread([&]() {
+            const auto tab = page->_GetFocusedTabImpl();
+            page->_settings.GlobalSettings().AcpAgent(L"claude");
+            tab->SetAgentOverride(L"copilot", {}, {}, L"host", {}, Tab::AgentOverrideOrigin::Restore);
+            VERIFY_IS_TRUE(tab->HasRestoredAgentOverride());
+            VERIFY_IS_FALSE(tab->HasExplicitAgentOverride());
+            VERIFY_ARE_EQUAL(std::wstring{ L"claude" }, page->_ResolveAgentPaneSettingsBindingForTab(tab, true).agentId);
+
+            Json::Value evt;
+            evt["params"]["window_id"] = std::to_string(page->_WindowProperties.WindowId());
+            evt["params"]["tab_id"] = winrt::to_string(tab->StableId());
+            evt["params"]["agent_id"] = "copilot";
+            evt["params"]["agent_source"] = "host";
+            Json::StreamWriterBuilder writer;
+            writer["indentation"] = "";
+            page->OnAgentSwitchRequested(winrt::to_hstring(Json::writeString(writer, evt)));
+
+            VERIFY_IS_FALSE(tab->HasRestoredAgentOverride());
+            VERIFY_IS_TRUE(tab->HasExplicitAgentOverride());
+            VERIFY_ARE_EQUAL(std::wstring{ L"copilot" }, page->_ResolveAgentPaneSettingsBindingForTab(tab, true).agentId);
+            tab->ClearAgentOverride();
+            VERIFY_IS_FALSE(tab->HasExplicitAgentOverride());
+            VERIFY_IS_FALSE(tab->HasRestoredAgentOverride());
+        });
     }
 
     void TabTests::PersistedLayoutAgentSessionsReceiveRestorePaths()
@@ -2954,6 +3088,7 @@ namespace TerminalAppLocalTests
         const winrt::com_ptr<winrt::TerminalApp::implementation::Tab>& tab)
     {
         VERIFY_IS_TRUE(tab->HasAgentOverride());
+        VERIFY_IS_TRUE(tab->GetAgentOverrideOrigin() == fixture.agentOverrideOrigin);
         VERIFY_ARE_EQUAL(winrt::hstring{ L"custom:transfer-regression" }, tab->AgentIdOverride());
         VERIFY_ARE_EQUAL(winrt::hstring{ L"transfer-model" }, tab->AgentModelOverride());
         VERIFY_ARE_EQUAL(fixture.agentCustomCommand, tab->AgentCustomCommandOverride());
@@ -2968,6 +3103,7 @@ namespace TerminalAppLocalTests
         VERIFY_ARE_EQUAL(winrt::hstring{ L"transaction-original-session" }, content.AgentSessionId());
         const auto args = content.GetNewTerminalArgs(BuildStartupKind::Persist).as<NewTerminalArgs>();
         VERIFY_ARE_EQUAL(fixture.agentRestoreCommandline, args.Commandline());
+        VERIFY_IS_TRUE(std::wstring_view{ args.Commandline() }.find(L"--agent-override") == std::wstring_view::npos);
         int argc = 0;
         const wil::unique_hlocal_ptr<PWSTR[]> argv{ CommandLineToArgvW(args.Commandline().c_str(), &argc) };
         VERIFY_IS_NOT_NULL(argv.get());
@@ -3390,7 +3526,7 @@ namespace TerminalAppLocalTests
         VERIFY_ARE_EQUAL(static_cast<DWORD>(WAIT_OBJECT_0), WaitForSingleObject(settled.m_handle, 10000));
     }
 
-    void TabTests::_verifyContentTransferReviewZoom(bool hidden, bool zoomed, bool freshReceiver, bool twoLeaves)
+    void TabTests::_verifyContentTransferReviewZoom(bool hidden, bool zoomed, bool freshReceiver, bool twoLeaves, bool restoredAgent)
     {
         auto fixture = _createContentTransferFixture(true, hidden, freshReceiver, twoLeaves);
         const auto cleanup = wil::scope_exit([&]() {
@@ -3406,6 +3542,16 @@ namespace TerminalAppLocalTests
         });
         TestOnUIThread([&]() {
             const auto tab = fixture->original.tab;
+            if (restoredAgent)
+            {
+                fixture->agentOverrideOrigin = winrt::TerminalApp::implementation::Tab::AgentOverrideOrigin::Restore;
+                tab->SetAgentOverride(tab->AgentIdOverride(),
+                                      tab->AgentModelOverride(),
+                                      tab->AgentCustomCommandOverride(),
+                                      tab->AgentSourceOverride(),
+                                      tab->AgentWslDistroOverride(),
+                                      fixture->agentOverrideOrigin);
+            }
             VERIFY_ARE_EQUAL(twoLeaves ? 2 : 3, tab->GetLeafPaneCount());
             if (!twoLeaves)
             {
@@ -3506,6 +3652,11 @@ namespace TerminalAppLocalTests
     void TabTests::ContentTransferReviewHiddenTabMovesWithoutZoom()
     {
         _verifyContentTransferReviewZoom(true, false, false);
+    }
+
+    void TabTests::ContentTransferRestoredAgentBindingKeepsOrigin()
+    {
+        _verifyContentTransferReviewZoom(true, false, false, true, true);
     }
 
     void TabTests::ContentTransferReviewVisibleZoomedTabMoves()
