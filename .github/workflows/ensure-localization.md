@@ -205,7 +205,7 @@ safe-outputs:
 
     excluded-files:
 
-      - 'src/cascadia/**/Resources/*.resw'
+      - 'src/cascadia/CascadiaPackage/Resources/Resources.resw'
 
       - 'src/cascadia/**/Resources/en-US/*.resw'
 
