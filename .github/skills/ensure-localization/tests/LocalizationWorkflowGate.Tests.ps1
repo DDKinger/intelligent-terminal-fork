@@ -184,55 +184,6 @@ Describe 'Ensure localization repair workflow gate' -Tag 'Unit' {
         $lock | Should -Match '(?ms)safe_outputs:.*?permissions:\s+contents:\s+write\s+issues:\s+write\s+pull-requests:\s+read'
     }
 
-    It 'excludes source-authority RESW files without excluding localized targets from the push patch' {
-        $workflow = Get-Content -LiteralPath $script:workflowPath -Raw
-        $excludedBlock = [regex]::Match(
-            $workflow,
-            "(?ms)push-to-pull-request-branch:.*?excluded-files:\s*(?<files>(?:\s*-\s*'[^']+'\s*)+)protected-files:"
-        )
-        $excludedBlock.Success | Should -BeTrue
-
-        $excludedFiles = @(
-            [regex]::Matches($excludedBlock.Groups['files'].Value, "-\s*'(?<path>[^']+)'") |
-                ForEach-Object { $_.Groups['path'].Value }
-        )
-        $excludedFiles | Should -Contain 'src/cascadia/CascadiaPackage/Resources/Resources.resw'
-        $excludedFiles | Should -Contain 'src/cascadia/**/Resources/en-US/*.resw'
-        $excludedFiles | Should -Not -Contain 'src/cascadia/**/Resources/*.resw'
-
-        $repoRoot = Join-Path $TestDrive 'push-patch-pathspec'
-        $null = & git -C $TestDrive init --quiet --initial-branch=main $repoRoot
-        $null = & git -C $repoRoot config user.name 'Copilot Tests'
-        $null = & git -C $repoRoot config user.email 'copilot-tests@example.test'
-
-        $paths = @(
-            'src/cascadia/CascadiaPackage/Resources/Resources.resw'
-            'src/cascadia/TerminalConnection/Resources/en-US/Resources.resw'
-            'src/cascadia/TerminalConnection/Resources/fr-FR/Resources.resw'
-        )
-        foreach ($path in $paths) {
-            $fullPath = Join-Path $repoRoot $path
-            [System.IO.Directory]::CreateDirectory((Split-Path -Path $fullPath -Parent)) | Out-Null
-            [System.IO.File]::WriteAllText($fullPath, '<root />', [System.Text.UTF8Encoding]::new($false))
-        }
-        $null = & git -C $repoRoot add -- $paths
-        $null = & git -C $repoRoot commit --quiet -m 'baseline'
-
-        foreach ($path in $paths) {
-            $fullPath = Join-Path $repoRoot $path
-            [System.IO.File]::WriteAllText($fullPath, '<root><data name="changed" /></root>', [System.Text.UTF8Encoding]::new($false))
-        }
-        $null = & git -C $repoRoot add -- $paths
-        $null = & git -C $repoRoot commit --quiet -m 'localization repair'
-
-        $excludePathspecs = @('--') + @($excludedFiles | ForEach-Object { ":(exclude)$_" })
-        $patch = & git -C $repoRoot format-patch 'HEAD~1..HEAD' --stdout @excludePathspecs
-        $LASTEXITCODE | Should -Be 0
-        ($patch | Out-String) | Should -Match 'src/cascadia/TerminalConnection/Resources/fr-FR/Resources\.resw'
-        ($patch | Out-String) | Should -Not -Match 'src/cascadia/TerminalConnection/Resources/en-US/Resources\.resw'
-        ($patch | Out-String) | Should -Not -Match 'src/cascadia/CascadiaPackage/Resources/Resources\.resw'
-    }
-
     It 'documents historical snapshot evidence for deletion-only and no-English-derived runs' {
         $repairWorkflow = Get-Content -LiteralPath $script:workflowPath -Raw
         $guideWorkflow = Get-Content -LiteralPath $script:guideWorkflowPath -Raw

@@ -203,14 +203,6 @@ safe-outputs:
 
       - 'tools/wta/locales/*.yml'
 
-    excluded-files:
-
-      - 'src/cascadia/CascadiaPackage/Resources/Resources.resw'
-
-      - 'src/cascadia/**/Resources/en-US/*.resw'
-
-      - 'tools/wta/locales/en-US.yml'
-
     protected-files: blocked
 
     if-no-changes: error
