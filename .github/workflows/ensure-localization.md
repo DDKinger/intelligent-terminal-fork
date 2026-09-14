@@ -255,8 +255,8 @@ post-steps:
       const fail = message => { console.error(`::error::Final localization checker report rejected: ${message}`); process.exit(1); };
       const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
-      const readJson = filename => {
-        const filenamePath = path.join(root, filename);
+      const readJson = (filename, directory = root) => {
+        const filenamePath = path.join(directory, filename);
         let stat;
         try { stat = fs.lstatSync(filenamePath); } catch { fail(`${filename} is missing`); }
         if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 2 || stat.size > 1024 * 1024) {
@@ -265,7 +265,7 @@ post-steps:
         let realRoot;
         let realFile;
         try {
-          realRoot = fs.realpathSync(root);
+          realRoot = fs.realpathSync(directory);
           realFile = fs.realpathSync(filenamePath);
         } catch {
           fail(`${filename} could not be resolved`);
@@ -277,7 +277,7 @@ post-steps:
         catch { fail(`${filename} is not valid JSON`); }
       };
 
-      const report = readJson('localization-final-checks.json');
+      const report = readJson('localization-final-checks.json', path.join(root, 'agent'));
       if (!isObject(report) || report.version !== 1 || report.mode !== mode || !Array.isArray(report.bundles) || report.bundles.length === 0) {
         fail('the report envelope is incomplete or has the wrong mode');
       }
@@ -361,7 +361,7 @@ post-steps:
     uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
     with:
       name: localization-final-checks
-      path: /tmp/gh-aw/localization-final-checks.json
+      path: /tmp/gh-aw/agent/localization-final-checks.json
       if-no-files-found: error
       retention-days: 7
 
@@ -417,14 +417,14 @@ authority read-only and finish with the required independent review. Invoke the
 registered `localization-review-gate` agent after the final checks and require
 its explicit `PASS` before requesting any branch write. The root repair agent
 owns all git inspection, scope discovery, edits, the final checker rerun, and
-writing `/tmp/gh-aw/localization-final-checks.json`; do not delegate those
+writing `/tmp/gh-aw/agent/localization-final-checks.json`; do not delegate those
 steps. Preserve the exact English-derived keys, values, and surrounding context
 through the final rerun; do not replace them with guesses from unchanged source
 lines, file prefixes, samples, or PR summaries.
 
 ## Output contract
 
-Remove `/tmp/gh-aw/localization-final-checks.json` at startup. After repair and
+Remove `/tmp/gh-aw/agent/localization-final-checks.json` at startup. After repair and
 review, write only actual final checker bundles to that fixed path:
 
 ```json

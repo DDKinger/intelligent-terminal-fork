@@ -100,11 +100,12 @@ Describe 'Ensure localization repair workflow gate' -Tag 'Unit' {
 
             $caseRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
             $ghawRoot = Join-Path $caseRoot 'gh-aw'
+            $agentRoot = Join-Path $ghawRoot 'agent'
             $repoRoot = Join-Path $caseRoot 'repo'
-            [System.IO.Directory]::CreateDirectory($ghawRoot) | Out-Null
+            [System.IO.Directory]::CreateDirectory($agentRoot) | Out-Null
             $head = Initialize-RepairGateRepo -Path $repoRoot
 
-            $reportPath = Join-Path $ghawRoot 'localization-final-checks.json'
+            $reportPath = Join-Path $agentRoot 'localization-final-checks.json'
             $queuedOutputPath = Join-Path $ghawRoot 'agent_output.json'
             $scriptPath = Join-Path $caseRoot 'repair-gate.js'
 
