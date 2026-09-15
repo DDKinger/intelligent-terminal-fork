@@ -10,6 +10,7 @@ setup.subtitle.copilot_missing: "Ihr Agent \"%{agent}\" ist nicht installiert. F
 setup.subtitle.agent_missing: "Ihr Agent \"%{agent}\" ist nicht installiert. Bitte installieren Sie ihn manuell neu und versuchen Sie es erneut. Um den Agenten zu wechseln, gehen Sie zu Intelligentes Terminal-Einstellungen > Agent."
 setup.subtitle.copilot_auth: "Ihr Agent \"%{agent}\" erfordert eine Authentifizierung. Führen Sie die folgenden Schritte aus, um sich anzumelden. Um den Agenten zu wechseln, gehen Sie zu Intelligentes Terminal-Einstellungen > Agent."
 setup.subtitle.agent_auth: "Ihr Agent \"%{agent}\" erfordert eine Authentifizierung. Bitte melden Sie sich über den Agent an und wählen Sie dann unten \"Ich habe mich angemeldet\" aus. Um den Agenten zu wechseln, gehen Sie zu Intelligentes Terminal-Einstellungen > Agent."
+setup.subtitle.connection_failed: "%{agent} konnte nicht gestartet werden."
 
 # {Locked=qps-ploc,qps-ploca,qps-plocm}
 
@@ -18,9 +19,15 @@ setup.option.install_hint: "(Wird automatisch installiert)"
 setup.option.signin: "Bei %{agent} anmelden"
 setup.option.retry_detection: "Erneut versuchen"
 setup.option.retry_auth: "Ich habe mich angemeldet — erneut verbinden"
+setup.option.retry_connection: "Erneut verbinden"
 setup.status.installing: "Installation läuft..."
+setup.status.installing_copilot_cli: "GitHub Copilot CLI wird installiert"
+setup.status.connecting_agent: "Verbindung mit %{agent} wird hergestellt"
 setup.status.install_failed: "Installation fehlgeschlagen: "
 setup.status.installing_winget: " Installation über winget..."
+setup.error.install_start_failed: "Das Installationsprogramm konnte nicht gestartet werden. Wählen Sie \"Erneut versuchen\", um es erneut zu versuchen."
+setup.error.install_timed_out: "Zeitüberschreitung bei der Installation. Wählen Sie \"Erneut versuchen\", bevor Sie eine weitere Installation starten."
+setup.error.install_detection_timed_out: "Die Installation ist abgeschlossen, Copilot ist jedoch noch nicht sichtbar. Wählen Sie \"Erneut versuchen\", um erneut zu prüfen."
 
 # ── Authentifizierungsablauf (src/ui/auth.rs) ──────────────────────────────────────────────
 # {Locked="CLI"} - Abkürzung, nicht übersetzen
@@ -51,6 +58,7 @@ chat.turn_canceled: "(abgebrochen)"
 chat.turn_executed: "→ ausgeführt: %{title}"
 # Persistent tool-category labels shown after a status marker and before a subject.
 chat.tool_kind.run: "Ausführen"
+chat.tool_kind.insert: "Einfügen"
 chat.tool_kind.read: "Lesen"
 chat.tool_kind.search: "Suchen"
 chat.tool_kind.edit: "Bearbeiten"
@@ -124,8 +132,25 @@ agents.status.idle: "Inaktiv"
 layout.welcome_hint: "  (Ctrl+Shift+. zum Ein-/Ausblenden des Agentbereichs • Ctrl+Shift+/ zum Ein-/Ausblenden der Agentsitzung)"  # {Locked="Ctrl+Shift+.","Ctrl+Shift+/"}
 
 # ── Verbindungsstatus ────────────────────────────────────────────────────────────
-connection.starting: "Agent wird gestartet..."
+# Preparing the AI agent connection, including preflight and reuse of a cached agent.
+connection.starting: "Verbindung mit dem Agenten wird vorbereitet..."
 connection.reconnecting: "Verbindung wird wiederhergestellt..."
+# Retiring old AI agent sessions for /restart, before the next connection phases.
+connection.restarting: "Agent wird neu gestartet..."
+# Connecting the pane to WTA's local coordinator process, not to an AI model.
+connection.coordinator: "Verbindung mit dem lokalen Koordinator wird hergestellt..."
+# Initializing the helper/coordinator connection, including local preparation and AI agent initialization.
+connection.initializing: "Verbindung mit dem Agenten wird initialisiert..."
+# Refreshing the user's authentication with the AI agent after login; not verifying the agent's identity.
+connection.authenticating: "Benutzer wird beim Agenten authentifiziert..."
+# Reading the coordinator's registry snapshot, including existing history; not fetching history from the AI agent.
+connection.syncing_sessions: "Sitzungsliste wird gelesen..."
+# Creating the AI agent session, including local registration; internal agent progress is unknown.
+connection.creating_session: "Agentsitzung wird erstellt..."
+# Applying the requested AI model before the connection is ready. Preserve %{model}.
+connection.selecting_model: "Sitzungsmodell wird festgelegt: %{model}..."  # {Locked="%{model}"}
+# Activity row while connecting to restore a conversation. Keep the actual stage first so narrow panes show it; session_id is shortened to eight characters.
+connection.resuming_stage: "%{stage} (Fortsetzen von %{session_id})"  # {Locked="%{stage}","%{session_id}"}
 connection.connecting_activity: "Verbindung mit dem Agenten wird hergestellt…"
 connection.lost: "Die Verbindung mit dem Agenten wurde getrennt. Geben Sie /restart ein, um die Verbindung wiederherzustellen."  # {Locked="/restart"}
 
@@ -241,5 +266,6 @@ config_picker.title: "Sitzungskonfiguration (↑ ↓ • Enter • Esc)"
 system.no_config_options: "Der verbundene Agent hat keine konfigurierbaren Sitzungsoptionen angekündigt."
 # {option} is an Agent-provided option name; {error} is the ACP error.
 system.config_update_failed: "%{option} konnte nicht aktualisiert werden: %{error}"
-system.provider_command_blocked_by_policy: "%{command}: Der Yolo-Modus ist durch die Richtlinie Ihrer Organisation deaktiviert."  # {Locked="Yolo","%{command}"} Shown when AllowYoloMode blocks a provider-advertised privileged command.
+system.yolo_disable_pending: "der Anbieter hat den erforderlichen nicht privilegierten Sitzungsstatus nicht bestätigt"  # Shown after the localized failure prefix while prompts remain blocked until the AI agent provider confirms that its privileged session mode is off. Provider means an AI agent provider, not a network provider.
+system.provider_command_blocked_by_policy: "%{command}: Automatische Genehmigung ist durch die Richtlinie Ihrer Organisation deaktiviert."  # {Locked="%{command}"} Shown when AllowAutomaticApproval blocks a provider-advertised privileged command.
 system.model_unknown: "Unbekanntes Modell %{model} — geben Sie /model ein, um die verfügbare Liste anzuzeigen."  # {Locked="%{model}","/model"}

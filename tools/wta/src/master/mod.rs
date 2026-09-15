@@ -129,6 +129,22 @@ impl ProviderBinding {
             Self::Custom { .. } => true,
         }
     }
+
+    fn telemetry_model_source(
+        &self,
+        agent_id: &str,
+        source: &crate::agent_source::AgentSource,
+    ) -> &'static str {
+        if matches!(source, crate::agent_source::AgentSource::Host)
+            && crate::agent_registry::lookup_profile_by_id(agent_id).byok_mode
+                != crate::agent_registry::ByokMode::Unsupported
+            && self.has_active_custom_provider()
+        {
+            "byok"
+        } else {
+            "provider"
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1556,8 +1572,10 @@ async fn initialize_response_for_agent(
     session_mcp_available: bool,
 ) -> Result<acp::schema::v1::InitializeResponse, serde_json::Error> {
     let mut response = agent.cached_init_resp.clone();
+    let binding = crate::session_registry::extract_wta_meta(&mut response.meta);
     let mut wta_meta = crate::session_registry::WtaMeta {
         resolved_agent_id: Some(agent.resolved_agent_id.clone()),
+        resolved_model_source: binding.resolved_model_source,
         proposal_mcp: session_mcp_available.then(|| "http-v1".to_string()),
         ..Default::default()
     };
@@ -1742,7 +1760,7 @@ fn is_already_loaded_error(err: &acp::Error) -> bool {
 impl MasterClient {
     async fn request_permission(
         &self,
-        args: acp::schema::v1::RequestPermissionRequest,
+        mut args: acp::schema::v1::RequestPermissionRequest,
     ) -> acp::Result<acp::schema::v1::RequestPermissionResponse> {
         let sid = args.session_id.clone();
         // The shared agent CLI can ask permission for an orphan session
@@ -1773,6 +1791,10 @@ impl MasterClient {
             session_id = ?sid,
             "forwarding permission request to helper"
         );
+        self.state
+            .session_mcp_capabilities
+            .stamp_server_identity(&sid, &mut args.meta)
+            .await;
         let resp = forwarder.request_permission(args).await;
         if let Err(ref e) = resp {
             tracing::warn!(
@@ -1789,13 +1811,23 @@ impl MasterClient {
 
     async fn session_notification(
         &self,
-        args: acp::schema::v1::SessionNotification,
+        mut args: acp::schema::v1::SessionNotification,
     ) -> acp::Result<()> {
         let sid = args.session_id.clone();
         // Discriminator for "what KIND of notification this is" — useful
         // when scrolling logs to see prompt/turn lifecycle without
         // tracing the full payload.
         let kind = notification_kind(&args);
+        if matches!(
+            &args.update,
+            acp::schema::v1::SessionUpdate::ToolCall(_)
+                | acp::schema::v1::SessionUpdate::ToolCallUpdate(_)
+        ) {
+            self.state
+                .session_mcp_capabilities
+                .stamp_server_identity(&sid, &mut args.meta)
+                .await;
+        }
         // Snapshot the sender, the per-route drop counter, AND the
         // owning helper_id under one map lock. `helper_id` is the
         // identity key the Closed-cleanup path uses to make sure a
@@ -3967,7 +3999,7 @@ pub async fn run_master_mode(config: MasterConfig, pipe_name: String) -> Result<
     // Every master-side failure (named-pipe create/connect, agent CLI spawn,
     // ACP initialize timeout/failure, accept-loop shutdown) funnels through
     // here. Log with target=master so connection failures are always present
-    // in wta-main_master.log, greppable alongside the success-path traces.
+    // in wta-main_master*.log, greppable alongside the success-path traces.
     if let Err(err) = &result {
         tracing::error!(target: "master", error = ?err, "wta-master exiting with error");
     }
@@ -5031,6 +5063,8 @@ async fn spawn_one_agent(
         crate::agent_source::AgentSource::Host => "Host",
         crate::agent_source::AgentSource::Wsl { .. } => "Wsl",
     };
+    let telemetry_model_source =
+        provider_binding.telemetry_model_source(&resolved_agent_id, source);
     let mut spawn_result = match spawn_agent_process_for_source_with_provider(
         agent_cmd,
         None,
@@ -5233,7 +5267,7 @@ async fn spawn_one_agent(
     )
     .await;
 
-    let init_resp = match init_outcome {
+    let mut init_resp = match init_outcome {
         Ok(Ok(resp)) => {
             stderr_log.mark_initialized();
             resp
@@ -5314,6 +5348,16 @@ async fn spawn_one_agent(
         "agent CLI initialize OK; cli_source resolved"
     );
 
+    // Cache the actual launch binding, replacing any agent-supplied WTA metadata.
+    // Every helper sharing this process receives the same category even if its
+    // model catalog or global settings change later.
+    crate::session_registry::inject_wta_meta(
+        &mut init_resp.meta,
+        &crate::session_registry::WtaMeta {
+            resolved_model_source: Some(telemetry_model_source.to_string()),
+            ..Default::default()
+        },
+    );
     let (cloud_catalog, start_clean_probe) = prepare_native_cloud_catalog(
         &resolved_agent_id,
         source,
@@ -6512,6 +6556,33 @@ async fn apply_master_session_event(
         let _gate_guard = gate.lock().await;
 
         if binding_only {
+            // A delayed restore birth may arrive after the CLI's real hook.
+            // Do not demote that live generation to watcher-owned or replace
+            // its title/cwd with the persisted layout's older metadata.
+            if is_born_bound {
+                if let crate::agent_sessions::SessionEvent::SessionStarted {
+                    pane_session_id, ..
+                } = &event
+                {
+                    if let Some(row) = state.registry.lookup(&sid).await {
+                        if row.pane_session_id.as_deref().is_some_and(|pane| {
+                            crate::agent_sessions::pane_key(pane)
+                                == crate::agent_sessions::pane_key(pane_session_id)
+                        }) && matches!(
+                            row.status,
+                            Some(
+                                crate::agent_sessions::AgentStatus::Idle
+                                    | crate::agent_sessions::AgentStatus::Working
+                                    | crate::agent_sessions::AgentStatus::Attention
+                            )
+                        ) && (state.hook_owned.lock().await.contains(&sid)
+                            || state.born_bound.lock().await.contains(&sid))
+                        {
+                            return (false, None);
+                        }
+                    }
+                }
+            }
             // A born-bound registration and ResumeDispatched explicitly mark a
             // new hook-free generation even when their reducer transition is a
             // no-op (for example the history row has not arrived yet, or was
@@ -8224,12 +8295,12 @@ async fn resolve_master_hook_key(
 
     // No id in the payload. Prefer the session currently bound to the pane the
     // hook came from.
-    let pane_lc = pane_session_id.to_ascii_lowercase();
+    let pane_lc = crate::agent_sessions::pane_key(pane_session_id);
     if !pane_lc.is_empty() {
         if let Some(row) = snapshot.iter().find(|s| {
             s.pane_session_id
                 .as_deref()
-                .map(|p| p.to_ascii_lowercase())
+                .map(crate::agent_sessions::pane_key)
                 .as_deref()
                 == Some(pane_lc.as_str())
                 && is_live(s)
@@ -8453,10 +8524,10 @@ async fn handle_master_wt_event(state: &Arc<MasterStateInner>, event_json: serde
                             | AgentStatus::Error
                     )
                 )
-                && row
-                    .pane_session_id
-                    .as_deref()
-                    .is_some_and(|pane| pane.eq_ignore_ascii_case(&pane_id))
+                && row.pane_session_id.as_deref().is_some_and(|pane| {
+                    crate::agent_sessions::pane_key(pane)
+                        == crate::agent_sessions::pane_key(&pane_id)
+                })
         });
         if let Some(row) = shell_session {
             let applied = state

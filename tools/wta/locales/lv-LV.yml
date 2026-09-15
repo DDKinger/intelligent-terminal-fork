@@ -10,6 +10,7 @@ setup.subtitle.copilot_missing: "Jūsu aģents \"%{agent}\" nav instalēts. Izpi
 setup.subtitle.agent_missing: "Jūsu aģents \"%{agent}\" nav instalēts. Pārinstalējiet to manuāli un mēģiniet vēlreiz. Lai mainītu aģentu, dodieties uz Viedais Terminālis Settings > Agent."
 setup.subtitle.copilot_auth: "Jūsu aģents \"%{agent}\" pieprasa autentifikāciju. Izpildiet tālāk norādītās darbības, lai pierakstītos. Lai mainītu aģentu, dodieties uz Viedais Terminālis Settings > Agent."
 setup.subtitle.agent_auth: "Jūsu aģents \"%{agent}\" pieprasa autentifikāciju. Pierakstieties, izmantojot aģentu, un izvēlieties \"Esmu pierakstījies\" zemāk. Lai mainītu aģentu, dodieties uz Viedais Terminālis Settings > Agent."
+setup.subtitle.connection_failed: "Neizdevās startēt %{agent}."
 
 # {Locked=qps-ploc,qps-ploca,qps-plocm}
 
@@ -18,9 +19,15 @@ setup.option.install_hint: "(Tiks instalēts automātiski)"
 setup.option.signin: "Pierakstīties %{agent}"
 setup.option.retry_detection: "Mēģināt vēlreiz"
 setup.option.retry_auth: "Esmu pierakstījies — mēģināt savienoties vēlreiz"
+setup.option.retry_connection: "Mēģināt vēlreiz izveidot savienojumu"
 setup.status.installing: "Instalē..."
+setup.status.installing_copilot_cli: "Instalē GitHub Copilot CLI"
+setup.status.connecting_agent: "Veido savienojumu ar %{agent}"
 setup.status.install_failed: "Instalēšana neizdevās: "
 setup.status.installing_winget: " Instalē, izmantojot winget..."
+setup.error.install_start_failed: "Neizdevās palaist instalēšanas programmu. Lai mēģinātu vēlreiz, atlasiet \"Mēģināt vēlreiz\"."
+setup.error.install_timed_out: "Instalēšanai iestājās taimauts. Pirms citas instalēšanas sākšanas atlasiet \"Mēģināt vēlreiz\"."
+setup.error.install_detection_timed_out: "Instalēšana ir pabeigta, bet Copilot vēl nav redzams. Lai pārbaudītu vēlreiz, atlasiet \"Mēģināt vēlreiz\"."
 
 # ── Auth flow (src/ui/auth.rs) ──────────────────────────────────────────────
 # {Locked="CLI"} - acronym, common usage across Microsoft localizations
@@ -51,6 +58,7 @@ chat.turn_canceled: "(atcelts)"
 chat.turn_executed: "→ izpildīts: %{title}"
 # Persistent tool-category labels shown after a status marker and before a subject.
 chat.tool_kind.run: "Izpildīt"
+chat.tool_kind.insert: "Ievietot"
 chat.tool_kind.read: "Lasīt"
 chat.tool_kind.search: "Meklēt"
 chat.tool_kind.edit: "Rediģēt"
@@ -123,8 +131,25 @@ agents.status.idle: "Dīkstāvē"
 layout.welcome_hint: "  (Ctrl+Shift+. lai rādītu/paslēptu aģenta paneli • Ctrl+Shift+/ lai rādītu/paslēptu aģenta sesiju)"  # {Locked="Ctrl+Shift+.","Ctrl+Shift+/"}
 
 # ── Connection state ────────────────────────────────────────────────────────
-connection.starting: "Startē aģentu..."
+# Preparing the AI agent connection, including preflight and reuse of a cached agent.
+connection.starting: "Sagatavo savienojumu ar aģentu..."
+# Retiring old AI agent sessions for /restart, before the next connection phases.
+connection.restarting: "Restartē aģentu..."
 connection.reconnecting: "Atkārtoti savienojas..."
+# Connecting the pane to WTA's local coordinator process, not to an AI model.
+connection.coordinator: "Veido savienojumu ar lokālo koordinatoru..."
+# Initializing the helper/coordinator connection, including local preparation and AI agent initialization.
+connection.initializing: "Inicializē savienojumu ar aģentu..."
+# Refreshing the user's authentication with the AI agent after login; not verifying the agent's identity.
+connection.authenticating: "Autentificē lietotāju pie aģenta..."
+# Reading the coordinator's registry snapshot, including existing history; not fetching history from the AI agent.
+connection.syncing_sessions: "Lasa sesiju sarakstu..."
+# Creating the AI agent session, including local registration; internal agent progress is unknown.
+connection.creating_session: "Izveido aģenta sesiju..."
+# Applying the requested AI model before the connection is ready. Preserve %{model}.
+connection.selecting_model: "Iestata sesijas modeli: %{model}..."  # {Locked="%{model}"}
+# Activity row while connecting to restore a conversation. Keep the actual stage first so narrow panes show it; session_id is shortened to eight characters.
+connection.resuming_stage: "%{stage} (atsāk %{session_id})"  # {Locked="%{stage}","%{session_id}"}
 connection.connecting_activity: "Savienojas ar aģentu…"
 connection.lost: "Savienojums ar aģentu tika zaudēts. Ierakstiet /restart, lai izveidotu savienojumu atkārtoti."  # {Locked="/restart"}
 
@@ -239,5 +264,6 @@ config_picker.title: "Sesijas konfigurācija (↑ ↓ • Enter • Esc)"
 system.no_config_options: "Savienotais aģents nereklamēja nekādas konfigurējamas sesijas opcijas."
 # {option} is an Agent-provided option name; {error} is the ACP error.
 system.config_update_failed: "Neizdevās atjaunināt opciju %{option}: %{error}"
-system.provider_command_blocked_by_policy: "%{command}: Yolo režīmu ir atspējojusi jūsu organizācijas politika."  # {Locked="Yolo","%{command}"} Shown when AllowYoloMode blocks a provider-advertised privileged command.
+system.yolo_disable_pending: "AI aģenta nodrošinātājs nav apstiprinājis, ka sesija ir nepieciešamajā stāvoklī bez paaugstinātām privilēģijām"  # Shown after the localized failure prefix while prompts remain blocked until the AI agent provider confirms that its privileged session mode is off. Provider means an AI agent provider, not a network provider.
+system.provider_command_blocked_by_policy: "%{command}: Automātisko apstiprināšanu ir atspējojusi jūsu organizācijas politika."  # {Locked="%{command}"} Shown when AllowAutomaticApproval blocks a provider-advertised privileged command.
 system.model_unknown: "Nezināms modelis %{model} — ierakstiet /model, lai redzētu pieejamo sarakstu."  # {Locked="%{model}","/model"}

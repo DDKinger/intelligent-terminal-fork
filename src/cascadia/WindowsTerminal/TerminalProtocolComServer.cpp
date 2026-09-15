@@ -6,6 +6,7 @@
 #include "TerminalProtocolComServer.h"
 #include "WindowEmperor.h"
 #include "AppHost.h"
+#include "../TerminalApp/AgentPaneLog.h"
 
 #include <json/json.h>
 #include <til/io.h>
@@ -280,6 +281,19 @@ static Json::Value _toJson(const Protocol::PaneOutput& o)
     return v;
 }
 
+static Json::Value _toJson(const Protocol::PaneContext& context)
+{
+    Json::Value v;
+    v["pane"] = _toJson(context.Pane);
+    v["content"] = winrt::to_string(context.Content);
+    v["output_source"] = winrt::to_string(context.OutputSource);
+    v["fallback_reason"] = winrt::to_string(context.FallbackReason);
+    v["line_count"] = context.LineCount;
+    v["truncated"] = static_cast<bool>(context.Truncated);
+    v["has_marks"] = static_cast<bool>(context.HasMarks);
+    return v;
+}
+
 static Json::Value _toJson(const Protocol::ProcessStatus& s)
 {
     Json::Value v;
@@ -505,8 +519,8 @@ try
     // ITerminalProtocol method is gated on this call.
     Json::Value v;
     v["authenticated"] = true;
-    // 2.2 — SendInput restored on the COM surface; pane identifiers remain GUIDs.
-    v["protocol_version"] = "2.2";
+    // 2.3 — GetPaneContext resolves and captures bounded pane context in one call.
+    v["protocol_version"] = "2.3";
     *resultJson = _bstrFromJson(v);
     return S_OK;
 }
@@ -538,6 +552,7 @@ try
         "subscribe",
         "unsubscribe",
         "send_event",
+        "get_pane_context",
     };
 
     Json::Value methods(Json::arrayValue);
@@ -711,6 +726,100 @@ try
     }
 
     return E_FAIL; // Pane not found
+}
+CATCH_RETURN()
+
+STDMETHODIMP TerminalProtocolComServer::GetPaneContext(
+    GUID sourceSessionId,
+    boolean hasExplicitSource,
+    long maxLines,
+    long maxCharacters,
+    BSTR* json)
+try
+{
+    RETURN_HR_IF_NULL(E_POINTER, json);
+    *json = nullptr;
+    const auto fail = [&](const char* reason, HRESULT hr = E_FAIL, AppHost* host = nullptr) noexcept {
+        try
+        {
+            const auto logic = host ? host->Logic() : nullptr;
+            winrt::TerminalApp::implementation::_agentPaneLog(fmt::format(
+                "pane_context_com_failed reason={} server_pid={} window_id={} explicit_source={} source_session={} hr=0x{:08X}",
+                reason,
+                GetCurrentProcessId(),
+                logic ? logic.WindowProperties().WindowId() : 0,
+                hasExplicitSource != 0,
+                winrt::to_string(winrt::to_hstring(winrt::guid{ sourceSessionId })),
+                static_cast<uint32_t>(hr)));
+        }
+        catch (...)
+        {
+        }
+        return hr;
+    };
+    if (!s_emperor)
+        return fail("server_not_initialized", E_NOT_VALID_STATE);
+    const auto getContext = [&](const auto& page, AppHost* host) {
+        try
+        {
+            return page.GetProtocolPaneContext(
+                           hasExplicitSource ? winrt::guid{ sourceSessionId } : winrt::guid{},
+                           hasExplicitSource != 0,
+                           maxLines,
+                           maxCharacters)
+                .get();
+        }
+        catch (...)
+        {
+            fail("page_context_exception", wil::ResultFromCaughtException(), host);
+            throw;
+        }
+    };
+
+    constexpr long MaxContextLines = 1000;
+    constexpr long MaxContextCharacters = 100000;
+    RETURN_HR_IF(E_INVALIDARG, maxLines < 0 || maxLines > MaxContextLines);
+    RETURN_HR_IF(E_INVALIDARG, maxCharacters < 0 || maxCharacters > MaxContextCharacters);
+
+    const auto windows = s_emperor->GetWindows();
+    if (hasExplicitSource)
+    {
+        RETURN_HR_IF(E_INVALIDARG, InlineIsEqualGUID(sourceSessionId, GUID{}));
+
+        for (const auto& host : windows)
+        {
+            const auto page = _getPage(host.get());
+            if (!page)
+            {
+                continue;
+            }
+
+            auto context = getContext(page, host.get());
+            if (context.Pane.SessionId != winrt::guid{})
+            {
+                context.Pane.WindowId = host->Logic().WindowProperties().WindowId();
+                *json = _bstrFromJson(_toJson(context));
+                return S_OK;
+            }
+        }
+        return fail("explicit_source_unresolved", HRESULT_FROM_WIN32(ERROR_NOT_FOUND));
+    }
+
+    const auto host = _getMostRecentHost(windows);
+    if (!host)
+        return fail("no_recent_host");
+
+    const auto page = _getPage(host.get());
+    if (!page)
+        return fail("page_unavailable", E_FAIL, host.get());
+
+    auto context = getContext(page, host.get());
+    if (context.Pane.SessionId == winrt::guid{})
+        return fail("page_returned_no_pane", E_FAIL, host.get());
+
+    context.Pane.WindowId = host->Logic().WindowProperties().WindowId();
+    *json = _bstrFromJson(_toJson(context));
+    return S_OK;
 }
 CATCH_RETURN()
 
@@ -1094,6 +1203,9 @@ try
     case ProtocolParsing::SendEventRoute::AgentStatus:
         _dispatchAgentStatusToPage(eventH);
         return S_OK;
+    case ProtocolParsing::SendEventRoute::AgentAvailability:
+        _dispatchAgentAvailabilityToPage(eventH);
+        return S_OK;
     case ProtocolParsing::SendEventRoute::AgentSwitch:
         _dispatchAgentSwitchToPage(eventH);
         return S_OK;
@@ -1221,6 +1333,39 @@ void TerminalProtocolComServer::_dispatchAgentStatusToPage(const winrt::hstring&
                 catch (...)
                 {
                     // Swallow: page may have been torn down during dispatch.
+                }
+            });
+    }
+}
+
+void TerminalProtocolComServer::_dispatchAgentAvailabilityToPage(const winrt::hstring& eventJson)
+{
+    if (!s_emperor)
+    {
+        return;
+    }
+
+    for (const auto& host : s_emperor->GetWindows())
+    {
+        auto page = _getPage(host.get());
+        if (!page)
+        {
+            continue;
+        }
+        const auto dispatcher = page.Dispatcher();
+        if (!dispatcher)
+        {
+            continue;
+        }
+        dispatcher.RunAsync(
+            winrt::Windows::UI::Core::CoreDispatcherPriority::Normal,
+            [page, eventJson]() {
+                try
+                {
+                    page.OnAgentAvailabilityChanged(eventJson);
+                }
+                catch (...)
+                {
                 }
             });
     }

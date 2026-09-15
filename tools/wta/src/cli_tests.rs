@@ -1,5 +1,20 @@
 use super::*;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+
+#[test]
+fn cli_schema_has_no_duplicate_short_flags() {
+    Cli::command().debug_assert();
+}
+
+#[test]
+fn split_pane_horizontal_uses_uppercase_short_flag() {
+    let cli = Cli::try_parse_from(["wta", "split-pane", "-H"])
+        .expect("split-pane -H must parse without colliding with help");
+    match cli.command {
+        Some(Command::SplitPane { horizontal, .. }) => assert!(horizontal),
+        other => panic!("expected split-pane command, got {other:?}"),
+    }
+}
 
 // Plan-C boot-time initial-load flags: WT bundles a session resume
 // with helper spawn by passing `--initial-load-session-id` (and
@@ -22,10 +37,25 @@ fn cli_parses_initial_load_session_id() {
 }
 
 #[test]
+fn cli_parses_initial_yolo_control_owner() {
+    let cli = Cli::try_parse_from([
+        "wta",
+        "--initial-load-session-id",
+        "abc-123",
+        "--initial-yolo-control-owner",
+        "manual",
+    ])
+    .expect("saved Yolo owner must parse");
+    assert_eq!(cli.initial_yolo_control_owner.as_deref(), Some("manual"));
+    assert!(Cli::try_parse_from(["wta", "--initial-yolo-control-owner", "unknown"]).is_err());
+}
+
+#[test]
 fn cli_initial_load_session_id_defaults_to_none() {
     let cli = Cli::try_parse_from(["wta"]).expect("no flags must parse");
     assert!(cli.initial_load_session_id.is_none());
     assert!(cli.initial_load_cwd.is_none());
+    assert!(cli.initial_yolo_control_owner.is_none());
     assert!(cli.initial_pane_position.is_none());
     assert!(!cli.follows_global_acp_model);
 }

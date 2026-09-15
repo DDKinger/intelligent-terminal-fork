@@ -296,19 +296,18 @@ namespace winrt::TerminalApp::implementation
             // re-checked against policy rather than taken from saved state.
             // Hand it to the spawn path, which does its own split.
             if (const auto& terminalArgs{ realArgs.ContentArgs().try_as<NewTerminalArgs>() };
-                terminalArgs && ::Microsoft::Terminal::AgentPaneRestore::IsPaneType(terminalArgs.Type()))
+                terminalArgs && !terminalArgs.ContentId() && ::Microsoft::Terminal::AgentPaneRestore::IsPaneType(terminalArgs.Type()))
             {
                 _RestoreAgentPaneFromLayout(activeTab, terminalArgs, realArgs.SplitDirection(), realArgs.SplitSize());
                 args.Handled(true);
                 return;
             }
 
-            _SplitPane(activeTab,
-                       realArgs.SplitDirection(),
-                       // This is safe, we're already filtering so the value is (0, 1)
-                       realArgs.SplitSize(),
-                       _MakePane(realArgs.ContentArgs(), duplicateFromTab));
-            args.Handled(true);
+            args.Handled(_SplitPane(activeTab,
+                                   realArgs.SplitDirection(),
+                                   // This is safe, we're already filtering so the value is (0, 1)
+                                   realArgs.SplitSize(),
+                                   _MakePane(realArgs.ContentArgs(), duplicateFromTab)));
         }
     }
 
@@ -504,7 +503,6 @@ namespace winrt::TerminalApp::implementation
         if (args == nullptr)
         {
             LOG_IF_FAILED(_OpenNewTab(nullptr));
-            args.Handled(true);
         }
         else if (const auto& realArgs = args.ActionArgs().try_as<NewTabArgs>())
         {
@@ -514,15 +512,10 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
 
-            // Belt and braces. `Pane::BuildStartupActions` lifts an agent pane
-            // out of the tree so it is always persisted as a `splitPane`, which
-            // `_HandleSplitPane` knows to divert to the restore path. A layout
-            // written before that — or hand-edited — could still name one here,
-            // and its command line is a restore record rather than something
-            // runnable. Strip it and open an ordinary tab rather than executing
-            // the record.
+            // Agent restore records are not executable command lines, including
+            // legacy layouts that place one in a newTab action.
             if (const auto& terminalArgs{ realArgs.ContentArgs().try_as<NewTerminalArgs>() };
-                terminalArgs && ::Microsoft::Terminal::AgentPaneRestore::IsPaneType(terminalArgs.Type()))
+                terminalArgs && !terminalArgs.ContentId() && ::Microsoft::Terminal::AgentPaneRestore::IsPaneType(terminalArgs.Type()))
             {
                 terminalArgs.Commandline({});
                 terminalArgs.SetContentType({});
@@ -530,7 +523,7 @@ namespace winrt::TerminalApp::implementation
 
             const auto result = _OpenNewTab(realArgs.ContentArgs());
             LOG_IF_FAILED(result);
-            args.Handled(true);
+            args.Handled(result == S_OK);
         }
     }
 
@@ -1978,12 +1971,9 @@ namespace winrt::TerminalApp::implementation
         const auto weak = get_weak();
         const auto dispatcher = Dispatcher();
 
-        // Snapshot WSL profile commandlines AND which non-WSL shells the user has
-        // profiles for, on the UI thread BEFORE we go background.
-        // _settings.AllProfiles() is an observable vector; iterating it
-        // concurrently with a settings reload would be unsafe.
-        const auto wslCommandlines = ShellIntegrationSweep::SnapshotWslCommandlines(_settings);
-        const auto shellPresence = ShellIntegrationSweep::SnapshotShellPresence(_settings);
+        const auto installShellIntegration = ShellIntegrationSweep::PrepareInstall(
+            _settings,
+            ShellIntegrationSweep::InstallTargets::All);
 
         co_await winrt::resume_background();
 
@@ -2024,7 +2014,7 @@ namespace winrt::TerminalApp::implementation
                 // Skipped shells are reported as success-already-installed
                 // so the all-installed / any-failure UI verdict below
                 // doesn't flag a missing shell as a failure.
-                const auto results = ShellIntegrationSweep::RunInstall(shellPresence, wslCommandlines);
+                const auto results = installShellIntegration(ShellIntegrationSweep::PowerShellPolicyCheck::Probe);
 
                 // Aggregate verdict across ALL four flavors (pwsh, WinPS,
                 // bash, every WSL distro). The earlier two-flavor version
@@ -2063,15 +2053,15 @@ namespace winrt::TerminalApp::implementation
 
                 allAlreadyInstalled = true; // becomes false on first non-alreadyInstalled below
 
-                if (shellPresence.pwsh)
+                if (results.shellPresence.pwsh)
                 {
                     consider(results.pwsh, L"PowerShell");
                 }
-                if (shellPresence.windowsPowerShell)
+                if (results.shellPresence.windowsPowerShell)
                 {
                     consider(results.windowsPowerShell, L"Windows PowerShell");
                 }
-                if (shellPresence.bash)
+                if (results.shellPresence.bash)
                 {
                     consider(results.bash, L"bash");
                 }
@@ -2211,7 +2201,8 @@ namespace winrt::TerminalApp::implementation
             // profile for. A user keeping only "Developer PowerShell
             // for VS" (which uses Windows PowerShell) and no pwsh
             // profile must not get pwsh integration written.
-            (void)ShellIntegrationSweep::RunInstall(shellPresence, wslCommandlines);
+            // GH#613: startup/settings reloads leave WSL to the lazy new-tab path.
+            (void)ShellIntegrationSweep::RunInstall(shellPresence, {}, ShellIntegrationSweep::InstallTargets::WindowsShells);
         }
         else
         {

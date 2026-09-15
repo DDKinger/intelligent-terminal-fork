@@ -61,6 +61,7 @@ TerminalProtocolComServer : public Microsoft::WRL::RuntimeClass<
     STDMETHODIMP Subscribe(ITerminalProtocolEventSink* sink) override;
     STDMETHODIMP Unsubscribe() override;
     STDMETHODIMP SendEvent(BSTR eventJson) override;
+    STDMETHODIMP GetPaneContext(GUID sourceSessionId, boolean hasExplicitSource, long maxLines, long maxCharacters, BSTR* json) override;
 
     // Static setup — must be called before s_StartListening().
     static void s_setEmperor(WindowEmperor* emperor) noexcept;
@@ -131,6 +132,7 @@ private:
     // they marshal SendEvent payloads onto each window's TerminalPage).
     static void _dispatchAutofixStateToPage(const winrt::hstring& eventJson);
     static void _dispatchAgentStatusToPage(const winrt::hstring& eventJson);
+    static void _dispatchAgentAvailabilityToPage(const winrt::hstring& eventJson);
     static void _dispatchAgentSwitchToPage(const winrt::hstring& eventJson);
     static void _dispatchCloseAgentPaneToPage(const winrt::hstring& eventJson);
     static void _dispatchDefaultPasteToPage(const winrt::hstring& eventJson);

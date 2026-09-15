@@ -32,7 +32,9 @@ namespace winrt::TerminalApp::implementation
         void Scroll(const int delta);
 
         std::shared_ptr<Pane> DetachRoot();
+        std::shared_ptr<Pane> TakeRootForTransfer();
         std::shared_ptr<Pane> DetachPane();
+        std::shared_ptr<Pane> DetachPane(const std::shared_ptr<Pane>& pane);
         void AttachPane(std::shared_ptr<Pane> pane);
 
         void AttachColorPicker(winrt::TerminalApp::ColorPickupFlyout& colorPicker);
@@ -122,6 +124,9 @@ namespace winrt::TerminalApp::implementation
         // original orientation.
         bool RestoreStashedAgentPane(winrt::Microsoft::Terminal::Settings::Model::SplitDirection direction);
         bool HasStashedAgentPane() const;
+        void SuppressAgentPrewarm() noexcept { _agentPrewarmSuppressed = true; }
+        void AllowAgentPrewarm() noexcept { _agentPrewarmSuppressed = false; }
+        bool AgentPrewarmSuppressed() const noexcept { return _agentPrewarmSuppressed; }
 
         // Runtime-only position selected by `/move`. A missing override means
         // this tab follows the global AgentPanePosition setting.
@@ -139,6 +144,13 @@ namespace winrt::TerminalApp::implementation
         // flag on each pane.
         void SetAgentChipOverride(std::optional<winrt::guid> sessionId);
 
+        enum class AgentOverrideOrigin
+        {
+            User,
+            // Needed to load the saved session, not a user opt-out from Settings.
+            Restore,
+        };
+
         // Per-tab AI agent override (runtime-only; not persisted). When set,
         // this tab's agent pane runs the chosen agent/model instead of the
         // global `acpAgent`/`acpModel`. Empty agent id means "follow the
@@ -153,17 +165,24 @@ namespace winrt::TerminalApp::implementation
         std::optional<winrt::guid> AgentSourceProfileGuid() const noexcept { return _agentSourceProfileGuid; }
         void AgentSourceProfileGuid(const winrt::guid& value) noexcept { _agentSourceProfileGuid = value; }
         bool HasAgentOverride() const noexcept { return !_agentIdOverride.empty(); }
+        bool HasExplicitAgentOverride() const noexcept { return HasAgentOverride() && _agentOverrideOrigin == AgentOverrideOrigin::User; }
+        bool HasRestoredAgentOverride() const noexcept { return HasAgentOverride() && _agentOverrideOrigin == AgentOverrideOrigin::Restore; }
+        AgentOverrideOrigin GetAgentOverrideOrigin() const noexcept { return _agentOverrideOrigin; }
+        const winrt::hstring& AgentCurrentId() const noexcept { return _agentCurrentId; }
+        void AgentCurrentId(const winrt::hstring& value) { _agentCurrentId = value; }
         void SetAgentOverride(const winrt::hstring& agentId,
                               const winrt::hstring& model,
                               const winrt::hstring& customCommand,
                               const winrt::hstring& source = L"host",
-                              const winrt::hstring& wslDistro = {})
+                              const winrt::hstring& wslDistro = {},
+                              const AgentOverrideOrigin origin = AgentOverrideOrigin::User)
         {
             _agentIdOverride = agentId;
             _agentModelOverride = model;
             _agentCustomCommandOverride = customCommand;
             _agentSourceOverride = source;
             _agentWslDistroOverride = wslDistro;
+            _agentOverrideOrigin = origin;
         }
         void ClearAgentOverride() noexcept
         {
@@ -172,6 +191,7 @@ namespace winrt::TerminalApp::implementation
             _agentCustomCommandOverride = {};
             _agentSourceOverride = {};
             _agentWslDistroOverride = {};
+            _agentOverrideOrigin = AgentOverrideOrigin::User;
         }
 
         // Stable per-tab identifier (GUID string). Survives tab reordering
@@ -267,6 +287,8 @@ namespace winrt::TerminalApp::implementation
         winrt::hstring _agentCustomCommandOverride{};
         winrt::hstring _agentSourceOverride{};
         winrt::hstring _agentWslDistroOverride{};
+        AgentOverrideOrigin _agentOverrideOrigin{ AgentOverrideOrigin::User };
+        winrt::hstring _agentCurrentId{};
         std::optional<winrt::guid> _agentSourceProfileGuid;
 
         winrt::Microsoft::Terminal::Settings::Model::IconStyle _lastIconStyle;
@@ -308,6 +330,7 @@ namespace winrt::TerminalApp::implementation
         bool _receivedKeyDown{ false };
         bool _iconHidden{ false };
         bool _changingActivePane{ false };
+        bool _agentPrewarmSuppressed{ false };
 
         winrt::hstring _stableId{};
 

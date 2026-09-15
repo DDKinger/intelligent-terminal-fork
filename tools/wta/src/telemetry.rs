@@ -17,11 +17,11 @@
 // Events emitted from this module:
 //   - AcpInitializeComplete  (ACP initialize RPC completes)
 //   - AcpNewSessionComplete  (ACP session/new RPC completes)
+//   - AcpLoadSessionComplete (ACP session/load RPC completes)
 //   - AgentPromptSent          (WTA dispatches a prompt over ACP)
 //   - AgentResponseFirstToken  (ACP returns the first text chunk)
 //   - AgentResponseComplete    (ACP prompt request completes)
 //   - ErrorDetected            (classify_wt_event positively classifies an error)
-//   - ErrorFixResolved         (next command's exit code is 0 after a fix attempt)
 //   - SlashCommandInvoked      (a built-in slash command is dispatched)
 //   - SessionsViewOpened       (the agent sessions view is opened)
 //   - SessionResumeInvoked     (a session resume route is dispatched)
@@ -29,6 +29,9 @@
 //   - HookOperationCompleted   (a hook install/uninstall operation completes)
 //   - DelegateInvoked          (delegation is triggered by an agent)
 //   - AgentColdStartComplete   (a new agent process is spawned and initialized)
+//
+// ErrorFixResolved was retired: analysis arming and subsequent prompt activity
+// cannot establish that a fix was applied or attribute a successful command to it.
 //
 // Conventions:
 //   - Per-event description: documented in the Rust doc comment above each
@@ -38,7 +41,7 @@
 //     source (and in this module's per-event subsection below) rather than
 //     in the event payload.
 //   - Keyword: MICROSOFT_KEYWORD_MEASURES (stub = 0 in OSS; real value in MS-internal build)
-//   - PartA_PrivTags: per-event — `ErrorDetected` / `ErrorFixResolved` /
+//   - PartA_PrivTags: per-event — `ErrorDetected` /
 //     `AgentPromptSent` use `PDT_ProductAndServiceUsage` (usage-tagged
 //     product signals), while the latency-bearing
 //     `AgentResponseFirstToken` and `AgentResponseComplete` use
@@ -156,6 +159,26 @@ pub fn log_acp_new_session_complete(
     );
 }
 
+/// Emitted when an ACP `session/load` RPC completes. This covers both a
+/// durable agent-pane restore and an explicit resume from the session view;
+/// the event deliberately does not distinguish those callers.
+///
+/// `duration_ms` is monotonic. The event intentionally records only
+/// completion latency and success so it remains independent of which layer
+/// enforced a timeout or returned an ACP error.
+pub fn log_acp_load_session_complete(duration_ms: f64, success: bool) {
+    let success_i32: i32 = if success { 1 } else { 0 };
+    tlg::write_event!(
+        AGENT_PROVIDER,
+        "AcpLoadSessionComplete",
+        level(Verbose),
+        keyword(MICROSOFT_KEYWORD_MEASURES),
+        f64("DurationMs", &duration_ms),
+        bool32("Success", &success_i32),
+        u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_PERFORMANCE),
+    );
+}
+
 /// Emitted when WTA dispatches a prompt over the ACP stream to an agent.
 ///
 /// Covers the agent-pane prompt-entry route. The C++ side emits its own
@@ -220,27 +243,14 @@ pub fn log_agent_response_first_token(
 /// Emitted when the agent finishes responding (prompt request completes).
 /// `total_duration_ms` is a monotonic duration (`Instant::elapsed`) from
 /// prompt dispatch to completion, not wall-clock.
-/// `raw_stdout_bytes_after_prompt` was the raw transport byte count read
-/// from the agent CLI's stdout after the prompt was dispatched (JSON-RPC
-/// framing / tool-call payloads included — a transport-level volume metric,
-/// not a measure of the final answer length).
-///
-/// NOTE: this is currently always 0. The stdout-read instrumentation lived
-/// in the direct agent-spawn path (`StartupInstrumentedReader`), which was
-/// removed when WTA moved to the master/helper architecture: a helper speaks
-/// ACP to wta-master over a named pipe and never reads the agent CLI's stdout
-/// directly — master owns that transport. The `raw_stdout_bytes_after_prompt`
-/// argument and the `TotalResponseBytes` ETW field are kept (always 0) for
-/// downstream schema compatibility; reintroducing the metric would mean
-/// accounting bytes at the master↔agent boundary. Until then, treat
-/// `TotalResponseBytes` as unpopulated rather than a per-session byte count.
+/// No response-byte field is emitted: master multiplexes agent stdout across
+/// sessions, so the helper has no attributable transport-byte measurement.
 ///
 /// Uses a distinct event name (`AgentResponseComplete`) — see the note on
 /// `log_agent_response_first_token` for why this is split into two events.
 pub fn log_agent_response_complete(
     session_id: &str,
     total_duration_ms: f64,
-    raw_stdout_bytes_after_prompt: u64,
     success: bool,
     is_byok: bool,
     agent_id: &str,
@@ -254,7 +264,6 @@ pub fn log_agent_response_complete(
         keyword(MICROSOFT_KEYWORD_MEASURES),
         str8("SessionId", session_id),
         f64("TotalDurationMs", &total_duration_ms),
-        u64("TotalResponseBytes", &raw_stdout_bytes_after_prompt),
         bool32("Success", &success_i32),
         bool32("IsByok", &is_byok_i32),
         str8("AgentId", sanitize_agent_id(agent_id)),
@@ -301,12 +310,7 @@ pub fn log_session_resume_invoked(route: &str, agent_id: &str) {
 /// Emitted once for each session MCP function invocation. Unknown function
 /// names are bucketed so model-provided strings never become telemetry fields.
 pub fn log_session_mcp_tool_called(tool_name: &str) {
-    let sanitized = match tool_name {
-        "terminal_send" | "terminal_open" | "terminal_open_and_send" | "request_user_input" => {
-            tool_name
-        }
-        _ => "unknown",
-    };
+    let sanitized = sanitize_session_mcp_tool_name(tool_name);
     tlg::write_event!(
         AGENT_PROVIDER,
         "SessionMcpToolCalled",
@@ -315,6 +319,20 @@ pub fn log_session_mcp_tool_called(tool_name: &str) {
         str8("ToolName", sanitized),
         u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
     );
+}
+
+fn sanitize_session_mcp_tool_name(tool_name: &str) -> &'static str {
+    use crate::agent_tools::action_proposal::schema::McpActionTool;
+    use crate::agent_tools::session_mcp::SessionMcpTool;
+
+    if tool_name == SessionMcpTool::UserInput.name() {
+        SessionMcpTool::UserInput.name()
+    } else {
+        McpActionTool::from_tool_name(tool_name)
+            .map(SessionMcpTool::TerminalAction)
+            .map(SessionMcpTool::name)
+            .unwrap_or("unknown")
+    }
 }
 
 /// Emitted for each supported CLI affected by hook install or uninstall.
@@ -381,19 +399,31 @@ pub fn log_error_detected(severity: &str, method: &str, pane_id: &str) {
     );
 }
 
-/// Emitted when the next command after an attempted fix succeeds (exit 0)
-/// in the same pane where autofix was armed. `time_since_fix_ms` is a
-/// monotonic duration (`Instant::elapsed`) from arming the fix to observing
-/// the successful exit, not wall-clock.
-pub fn log_error_fix_resolved(pane_id: &str, time_since_fix_ms: f64, agent_id: &str) {
-    tlg::write_event!(
-        AGENT_PROVIDER,
-        "ErrorFixResolved",
-        level(Verbose),
-        keyword(MICROSOFT_KEYWORD_MEASURES),
-        str8("PaneId", pane_id),
-        f64("TimeSinceFixMs", &time_since_fix_ms),
-        str8("AgentId", sanitize_agent_id(agent_id)),
-        u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
-    );
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_tools::session_mcp::SessionMcpTool;
+
+    #[test]
+    fn session_mcp_telemetry_uses_canonical_names() {
+        for tool in SessionMcpTool::ALL {
+            assert_eq!(sanitize_session_mcp_tool_name(tool.name()), tool.name());
+        }
+    }
+
+    #[test]
+    fn session_mcp_telemetry_buckets_obsolete_and_arbitrary_names() {
+        for name in [
+            "terminal_send",
+            "terminal_open",
+            "terminal_open_and_send",
+            "",
+            "arbitrary-private-tool-name",
+            " run_command_in_current_shell",
+            "RUN_COMMAND_IN_CURRENT_SHELL",
+            "mcp__intellterm_0123456789abcdef__create_workspace",
+        ] {
+            assert_eq!(sanitize_session_mcp_tool_name(name), "unknown");
+        }
+    }
 }

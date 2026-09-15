@@ -10,6 +10,7 @@ setup.subtitle.copilot_missing: "Ваш агент \"%{agent}\" не устан�
 setup.subtitle.agent_missing: "Ваш агент \"%{agent}\" не установлен. Переустановите его вручную и повторите попытку. Чтобы сменить агента, перейдите в Интеллектуальный Терминал Settings > Agent."
 setup.subtitle.copilot_auth: "Ваш агент \"%{agent}\" требует аутентификации. Выполните указанные ниже шаги для входа. Чтобы сменить агента, перейдите в Интеллектуальный Терминал Settings > Agent."
 setup.subtitle.agent_auth: "Ваш агент \"%{agent}\" требует аутентификации. Войдите через агента, затем выберите \"Я вошёл\" ниже. Чтобы сменить агента, перейдите в Интеллектуальный Терминал Settings > Agent."
+setup.subtitle.connection_failed: "Не удалось запустить %{agent}."
 
 # {Locked=qps-ploc,qps-ploca,qps-plocm}
 
@@ -18,9 +19,15 @@ setup.option.install_hint: "(Будет установлен автоматич�
 setup.option.signin: "Войти в %{agent}"
 setup.option.retry_detection: "Повторить попытку"
 setup.option.retry_auth: "Я вошёл — попробовать подключиться снова"
+setup.option.retry_connection: "Попробовать подключиться снова"
 setup.status.installing: "Установка..."
+setup.status.installing_copilot_cli: "Установка GitHub Copilot CLI"
+setup.status.connecting_agent: "Подключение к %{agent}"
 setup.status.install_failed: "Ошибка установки: "
 setup.status.installing_winget: " Установка через winget..."
+setup.error.install_start_failed: "Не удалось запустить установщик. Выберите \"Повторить попытку\", чтобы повторить попытку."
+setup.error.install_timed_out: "Время ожидания установки истекло. Прежде чем запускать другую установку, выберите \"Повторить попытку\"."
+setup.error.install_detection_timed_out: "Установка завершена, но Copilot пока не отображается. Выберите \"Повторить попытку\", чтобы проверить еще раз."
 
 # ── Поток аутентификации (src/ui/auth.rs) ──────────────────────────────────────────────
 # {Locked="CLI"} - аббревиатура, не переводить
@@ -51,6 +58,7 @@ chat.turn_canceled: "(отменено)"
 chat.turn_executed: "→ выполнено: %{title}"
 # Постоянные метки категорий инструментов, отображаемые после маркера состояния и перед объектом действия.
 chat.tool_kind.run: "Запуск"
+chat.tool_kind.insert: "Вставить"
 chat.tool_kind.read: "Чтение"
 chat.tool_kind.search: "Поиск"
 chat.tool_kind.edit: "Изменение"
@@ -132,8 +140,25 @@ agents.status.idle: "Простаивает"
 layout.welcome_hint: "  (Ctrl+Shift+. — показать/скрыть панель агента • Ctrl+Shift+/ — показать/скрыть сеанс агента)"  # {Locked="Ctrl+Shift+.","Ctrl+Shift+/"}
 
 # ── Состояние подключения ────────────────────────────────────────────────────────────
-connection.starting: "Запуск агента..."
+# Preparing the AI agent connection, including preflight and reuse of a cached agent.
+connection.starting: "Подготовка подключения к агенту..."
+# Retiring old AI agent sessions for /restart, before the next connection phases.
+connection.restarting: "Перезапуск агента..."
 connection.reconnecting: "Переподключение..."
+# Connecting the pane to WTA's local coordinator process, not to an AI model.
+connection.coordinator: "Подключение к локальному координатору..."
+# Initializing the helper/coordinator connection, including local preparation and AI agent initialization.
+connection.initializing: "Инициализация подключения к агенту..."
+# Refreshing the user's authentication with the AI agent after login; not verifying the agent's identity.
+connection.authenticating: "Аутентификация пользователя у агента..."
+# Reading the coordinator's registry snapshot, including existing history; not fetching history from the AI agent.
+connection.syncing_sessions: "Чтение списка сеансов..."
+# Creating the AI agent session, including local registration; internal agent progress is unknown.
+connection.creating_session: "Создание сеанса агента..."
+# Applying the requested AI model before the connection is ready. Preserve %{model}.
+connection.selecting_model: "Установка модели сеанса: %{model}..."  # {Locked="%{model}"}
+# Activity row while connecting to restore a conversation. Keep the actual stage first so narrow panes show it; session_id is shortened to eight characters.
+connection.resuming_stage: "%{stage} (возобновление %{session_id})"  # {Locked="%{stage}","%{session_id}"}
 connection.connecting_activity: "Подключение к агенту…"
 connection.lost: "Подключение к агенту потеряно. Введите /restart, чтобы подключиться снова."  # {Locked="/restart"}
 
@@ -239,5 +264,6 @@ config_picker.title: "Конфигурация сеанса (↑ ↓ • Enter �
 system.no_config_options: "Подключённый агент не объявил ни одного настраиваемого параметра сеанса."
 # {option} is an Agent-provided option name; {error} is the ACP error.
 system.config_update_failed: "Не удалось обновить %{option}: %{error}"
-system.provider_command_blocked_by_policy: "%{command}: Режим Yolo отключен политикой вашей организации."  # {Locked="Yolo","%{command}"} Shown when AllowYoloMode blocks a provider-advertised privileged command.
+system.yolo_disable_pending: "поставщик не подтвердил требуемое непривилегированное состояние сеанса"  # Shown after the localized failure prefix while prompts remain blocked until the AI agent provider confirms that its privileged session mode is off. Provider means an AI agent provider, not a network provider.
+system.provider_command_blocked_by_policy: "%{command}: Автоматическое одобрение отключено политикой вашей организации."  # {Locked="%{command}"} Shown when AllowAutomaticApproval blocks a provider-advertised privileged command.
 system.model_unknown: "Неизвестная модель %{model} — введите /model, чтобы увидеть доступный список."  # {Locked="%{model}","/model"}
