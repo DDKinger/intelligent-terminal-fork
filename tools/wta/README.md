@@ -98,12 +98,26 @@ refresh, not on local session-change broadcasts. Connection failures remain
 visible; a failed refresh keeps the last successful list rather than presenting
 an empty list as success.
 
+After Terminal confirms the resumed pane was created, its row shows **Idle**.
+Pressing Enter again focuses that pane instead of launching a duplicate. F5 and
+reopening the view preserve the binding; a failed creation remains retryable,
+and closing the pane or its SSH connection ends the binding. These bindings
+belong to the viewing helper and last for that helper's lifetime.
+
+`origin` and `status` are independent. Resuming from the Sessions view opens an
+ordinary SSH shell pane, not an ACP agent pane, so `origin` remains `Unknown`
+while the bound row's `status` becomes `Idle`. Idle indicates a known local pane
+binding; it does not report the remote agent's tool activity.
+
 The same history is available without a running WTA master:
 
 ```powershell
 wta sessions list --ssh dev@linux-host --cli copilot --json
 wta sessions list --ssh work-alias --port 2222 --cli copilot
 ```
+
+This standalone CLI reads remote history only; it does not query the viewing
+helper's in-memory pane bindings, so its rows remain `Historical`.
 
 Requirements and boundaries:
 
@@ -120,8 +134,9 @@ Requirements and boundaries:
   the local session MCP endpoint or provider credentials.
 - Resume restores the agent's conversation history; it does **not** attach to
   an already-running remote process or provide persistent SSH shell sessions.
-  Remote activity/liveness, hooks, and automatic detection of manually typed
-  SSH connections are not part of this first version.
+  Remote agent activity, discovery of independently running remote processes,
+  hooks, and automatic detection of manually typed SSH connections are not
+  part of this first version.
 
 ### Protocol Discovery & Environment Setup
 

@@ -2182,6 +2182,13 @@ impl App {
             } => {
                 self.handle_ssh_sessions_loaded(&tab_id, request_id, &target, &agent_id, result);
             }
+            AppEvent::SshSessionResumeCompleted {
+                key,
+                operation_id,
+                outcome,
+            } => {
+                self.handle_ssh_resume_completed(key, operation_id, outcome);
+            }
             AppEvent::RegisterBornBoundSession { event } => {
                 self.register_born_bound_session(event);
             }
@@ -2998,6 +3005,9 @@ impl App {
                 // safe to apply unconditionally for non-own panes.
                 if method == "connection_state" {
                     let state = params.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                    if matches!(state, "closed" | "failed") {
+                        self.ssh_resume_pane_closed(&pane_id);
+                    }
                     tracing::info!(
                         target: "helper_wt_event",
                         pane_id = %pane_id,

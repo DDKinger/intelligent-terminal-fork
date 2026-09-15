@@ -377,10 +377,12 @@ mod tests {
         assert_eq!(app.current_tab().current_view, View::Chat);
     }
 
-    #[test]
-    fn ssh_resume_uses_remote_cli_without_mutating_same_id_host_session() {
+    #[tokio::test]
+    async fn ssh_resume_uses_remote_cli_without_mutating_same_id_host_session() {
         let _locale = crate::test_support::lock_locale();
         let (mut app, mut master_rx) = test_app_with_master_rx();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        app.event_tx = Some(event_tx);
         let source = source("remote");
         prepare(&mut app, DEFAULT_TAB_ID, &source, 1);
         let key = "same-id".to_string();
@@ -641,7 +643,10 @@ impl App {
             }
         });
         match result {
-            Ok(rows) => {
+            Ok(mut rows) => {
+                if let Some(source) = &tab.agents_view.ssh_source {
+                    self.ssh_resumes.merge_rows(&mut rows, source);
+                }
                 tab.agents_view.snapshot = Some(
                     rows.iter()
                         .map(crate::session_registry::agent_session_to_session_info)
@@ -669,7 +674,7 @@ impl App {
         session: &AgentSession,
         target: &SshTarget,
     ) {
-        let result = (|| -> Result<Vec<String>> {
+        let result = (|| -> Result<()> {
             let agent_id = known_cli_id(&session.cli_source)
                 .ok_or_else(|| anyhow::anyhow!("Unknown SSH session agent."))?;
             anyhow::ensure!(
@@ -690,31 +695,11 @@ impl App {
                 &session.key,
                 &session.cwd.to_string_lossy(),
             )?;
-            let mut argv = vec!["new-tab".to_string(), "-c".to_string(), commandline];
-            if !session.title.is_empty() {
-                argv.extend(["--title".to_string(), session.title.clone()]);
-            }
-            Ok(argv)
+            self.start_ssh_session_resume(session, commandline)
         })();
-        match result {
-            Ok(argv) => {
-                // Remote history is not a liveness report. In particular, never
-                // publish its raw session id into the host registry.
-                #[cfg(not(test))]
-                crate::shell::wt_channel::spawn_wtcli_split_then_focus_with_callback(&argv, None);
-                #[cfg(test)]
-                {
-                    self.last_dispatched_command = Some(DispatchedCommand {
-                        kind: DispatchedCommandKind::NewTabResume,
-                        session_id: None,
-                        argv,
-                    });
-                }
-            }
-            Err(error) => {
-                tracing::warn!(target: "ssh_sessions", %error, "SSH session resume failed");
-                self.current_tab_mut().agents_view.ssh_error = Some(format!("{error:#}"));
-            }
+        if let Err(error) = result {
+            tracing::warn!(target: "ssh_sessions", %error, "SSH session resume failed");
+            self.current_tab_mut().agents_view.ssh_error = Some(format!("{error:#}"));
         }
     }
 }

@@ -71,6 +71,7 @@ fn agent_command_on_enter(input: &str, selected: Option<&AvailableAgent>) -> Opt
 mod attachments;
 mod autofix;
 mod input_edit;
+mod ssh_resume;
 mod ssh_session_view;
 mod tab_state;
 mod turn_state;
@@ -79,6 +80,7 @@ use autofix::*;
 pub use crate::turn_context::TurnContext;
 #[cfg(test)]
 use input_edit::{next_word_boundary, prev_word_boundary, INPUT_HISTORY_MAX_ENTRIES};
+pub(crate) use ssh_resume::{SshResumeOutcome, SshSessionKey};
 pub use tab_state::{
     ChatMessage, CompletedTurn, ConfigPickerState, NoticeKind, PermissionState,
     RecommendationFocus, TabSession, ToolCallContent, ToolCallKind, ToolCallLocation,
@@ -1210,6 +1212,7 @@ pub struct App {
     /// session list itself is global; only the *picker view* (open state
     /// + selected row) lives per-tab on `TabSession`.
     pub agent_sessions: crate::agent_sessions::AgentSessionRegistry,
+    ssh_resumes: ssh_resume::SshResumes,
     /// Whether the connected ACP agent advertised the `loadSession`
     /// capability in its initialize response. Used by the
     /// session management view's Enter handler to short-circuit
@@ -1493,6 +1496,7 @@ impl App {
             pending_session_load: None,
             session_to_tab: HashMap::new(),
             agent_sessions: crate::agent_sessions::AgentSessionRegistry::new(),
+            ssh_resumes: ssh_resume::SshResumes::default(),
             agent_supports_load_session: false,
             agent_supports_image: false,
             sessions_origin_filter: resolve_sessions_origin_filter(),
@@ -2805,6 +2809,9 @@ impl App {
         use crate::session_mgmt::{
             decide_enter_action, liveness_from_status, EnterAction, NotResumableReason, RowSnapshot,
         };
+        if self.ssh_resume_pending(s) {
+            return;
+        }
         // Ambient: load_session capability is set during ACP init;
         // resume-flag support is a per-CLI profile constant — true for
         // Claude / Codex / Copilot / Gemini / OpenCode, though the exact
@@ -2853,7 +2860,14 @@ impl App {
 
         match action {
             EnterAction::Focus { pane_session_id } => {
-                self.dispatch_focus_pane(&pane_session_id, &s.key);
+                if matches!(
+                    s.location,
+                    crate::agent_sessions::SessionLocation::Ssh { .. }
+                ) {
+                    self.dispatch_ssh_session_focus(s, &pane_session_id);
+                } else {
+                    self.dispatch_focus_pane(&pane_session_id, &s.key);
+                }
             }
             EnterAction::ResumeInAgentPane { .. } => {
                 // dispatch_resume_in_agent_pane owns the loadSession
@@ -3337,6 +3351,7 @@ impl App {
                 tab.agents_list_state.select(Some(0));
             }
         }
+        self.refresh_ssh_resume_snapshots();
         self.update_agents_focus_for_tab(&tab_id);
         self.schedule_agents_refetch_for_tab(&tab_id);
     }
@@ -4551,6 +4566,7 @@ impl App {
             AppEvent::AgentsSnapshotLoaded { .. } => "agents_snapshot_loaded",
             AppEvent::AgentsSnapshotFailed { .. } => "agents_snapshot_failed",
             AppEvent::SshSessionsLoaded { .. } => "ssh_sessions_loaded",
+            AppEvent::SshSessionResumeCompleted { .. } => "ssh_session_resume_completed",
             AppEvent::RegisterBornBoundSession { .. } => "register_born_bound_session",
             AppEvent::MasterMutationCompleted { .. } => "master_mutation_completed",
             AppEvent::DirectTerminalActionProposal { .. } => "direct_terminal_action_proposal",

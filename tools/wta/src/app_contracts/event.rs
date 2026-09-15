@@ -325,6 +325,11 @@ pub enum AppEvent {
         agent_id: String,
         result: Result<Vec<crate::agent_sessions::AgentSession>, String>,
     },
+    SshSessionResumeCompleted {
+        key: crate::app::SshSessionKey,
+        operation_id: uuid::Uuid,
+        outcome: crate::app::SshResumeOutcome,
+    },
     RegisterBornBoundSession {
         event: crate::agent_sessions::SessionEvent,
     },
