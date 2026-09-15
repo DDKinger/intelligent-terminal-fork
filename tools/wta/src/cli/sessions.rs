@@ -59,26 +59,73 @@ fn print_sessions(
 async fn fetch_from_master(
     master_override: Option<String>,
 ) -> Result<Vec<crate::session_registry::SessionInfo>> {
+    let request = crate::session_registry::build_sessions_list_request(false);
+    let response =
+        request_from_master_with_identity(master_override, request, "wta-sessions").await?;
+    let parsed = crate::session_registry::parse_sessions_list_response(&response.0)
+        .context("parse sessions/list response")?;
+    Ok(parsed.sessions)
+}
+
+struct RegistryConnection(crate::protocol::acp::conn::ClientLink);
+
+impl Drop for RegistryConnection {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+
+/// The same registry transport serves the CLI and SSH-profile helpers without
+/// starting a local chat agent. The explicit pipe keeps a helper in its master.
+pub(crate) async fn request_from_master(
+    master_override: Option<String>,
+    request: acp::schema::v1::ExtRequest,
+) -> Result<acp::schema::v1::ExtResponse> {
+    request_from_master_with_identity(master_override, request, "wta-session-registry").await
+}
+
+async fn request_from_master_with_identity(
+    master_override: Option<String>,
+    request: acp::schema::v1::ExtRequest,
+    client_name: &'static str,
+) -> Result<acp::schema::v1::ExtResponse> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(110),
+        request_from_master_inner(master_override, request, client_name),
+    )
+    .await
+    .context("session registry request timed out")?
+}
+
+async fn request_from_master_inner(
+    master_override: Option<String>,
+    request: acp::schema::v1::ExtRequest,
+    client_name: &'static str,
+) -> Result<acp::schema::v1::ExtResponse> {
     let pipe_name = resolve_master_pipe(master_override).await?;
     let pipe = open_master_pipe(&pipe_name).await?;
     let (read_half, write_half) = tokio::io::split(pipe);
     let outgoing = write_half.compat_write();
     let incoming = read_half.compat();
     let (conn, handle_io) = crate::protocol::acp::conn::spawn_client(
-        acp::Client.builder().name("wta-sessions"),
+        acp::Client.builder().name(client_name),
         crate::protocol::acp::conn::byte_streams(outgoing, incoming),
     );
-    tokio::task::spawn_local(async move {
-        let _ = handle_io.await;
-    });
+    let conn = RegistryConnection(conn);
+    let _io_task = tokio_util::task::AbortOnDropHandle::new(tokio::task::spawn_local(async move {
+        if let Err(error) = handle_io.await {
+            tracing::debug!(target: "session_registry", %error, "registry connection ended");
+        }
+    }));
 
     let init_started = std::time::Instant::now();
     let init_result = conn
+        .0
         .initialize(
             acp::schema::v1::InitializeRequest::new(acp::schema::ProtocolVersion::V1)
                 .client_capabilities(acp::schema::v1::ClientCapabilities::new())
                 .client_info(
-                    acp::schema::v1::Implementation::new("wta-sessions", env!("CARGO_PKG_VERSION"))
+                    acp::schema::v1::Implementation::new(client_name, env!("CARGO_PKG_VERSION"))
                         .title("Windows Terminal Agent sessions CLI"),
                 ),
         )
@@ -94,16 +141,12 @@ async fn fetch_from_master(
             .map(|e| e.code.into())
             .unwrap_or(0),
     );
-    init_result.map_err(|_| anyhow::anyhow!(MASTER_NOT_RUNNING))?;
+    init_result.context("initialize session registry connection")?;
 
-    let req = crate::session_registry::build_sessions_list_request(false);
-    let resp = conn
-        .ext_method(req)
+    conn.0
+        .ext_method(request)
         .await
-        .map_err(|_| anyhow::anyhow!(MASTER_NOT_RUNNING))?;
-    let parsed = crate::session_registry::parse_sessions_list_response(&resp.0)
-        .context("parse sessions/list response")?;
-    Ok(parsed.sessions)
+        .context("master session registry request failed")
 }
 
 /// Best-effort: register a WTA-launched CLI session with `wta-master` as a
@@ -344,6 +387,26 @@ fn format_epoch_ms_utc(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn registry_connection_guard_closes_its_transport_when_a_request_is_cancelled() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, _peer) = tokio::io::duplex(1024);
+                let (read, write) = tokio::io::split(client);
+                let (connection, io) = crate::protocol::acp::conn::spawn_client(
+                    acp::Client.builder().name("wta-session-registry"),
+                    crate::protocol::acp::conn::byte_streams(write.compat_write(), read.compat()),
+                );
+                let connection = RegistryConnection(connection);
+                drop(connection);
+                tokio::time::timeout(std::time::Duration::from_secs(2), io)
+                    .await
+                    .expect("registry transport must close without waiting for peer EOF")
+                    .expect("intentional registry shutdown must be clean");
+            })
+            .await;
+    }
 
     #[test]
     fn json_lines_prints_one_session_info_per_line() {

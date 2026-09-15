@@ -1,117 +1,165 @@
 use super::*;
-use crate::agent_sessions::SessionOrigin;
+use crate::agent_sessions::{AgentStatus, SessionEvent, SessionOrigin};
 use crate::app::tests::test_app_with_master_rx;
-use crate::shell::wt_channel::WtChannel;
-use serde_json::{json, Value};
+use crate::session_registry::{InMemoryRegistry, SessionInfo, SessionRegistry};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-const PANE: &str = "11111111-1111-4111-8111-111111111111";
-const OTHER_PANE: &str = "22222222-2222-4222-8222-222222222222";
-
-struct Reply {
-    method: &'static str,
-    result: std::result::Result<Value, String>,
+// Separate helper Apps use one shared registry endpoint. Native lifecycle
+// execution and wire dispatch are covered by the master's own tests.
+struct SharedRegistry {
+    registries: Mutex<HashMap<Source, Arc<InMemoryRegistry>>>,
+    requests: Mutex<Vec<Request>>,
+    failure: Mutex<Option<String>>,
+    epoch: uuid::Uuid,
+    revision: AtomicU64,
+    creates: AtomicU64,
+    focuses: AtomicU64,
 }
 
-fn created(pane_id: &str) -> Reply {
-    Reply {
-        method: "create_tab",
-        result: Ok(json!({ "session_id": pane_id })),
-    }
-}
-
-fn focused() -> Reply {
-    Reply {
-        method: "focus_pane",
-        result: Ok(json!({})),
-    }
-}
-
-fn failed(method: &'static str, message: &str) -> Reply {
-    Reply {
-        method,
-        result: Err(message.to_string()),
-    }
-}
-
-struct MockTerminal {
-    calls: Mutex<Vec<(String, Value)>>,
-    replies: Mutex<VecDeque<Reply>>,
-    called: tokio::sync::Notify,
-}
-
-#[async_trait::async_trait]
-impl WtChannel for MockTerminal {
-    async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push((method.to_string(), params));
-        self.called.notify_one();
-        let reply = self
-            .replies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| anyhow::anyhow!("Unexpected terminal request: {method}"))?;
-        assert_eq!(reply.method, method);
-        reply.result.map_err(anyhow::Error::msg)
-    }
-
-    fn is_available(&self) -> bool {
-        true
-    }
-}
-
-impl MockTerminal {
-    async fn wait_calls(&self, count: usize) {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let notified = self.called.notified();
-                if self.calls.lock().unwrap().len() >= count {
-                    return;
-                }
-                notified.await;
-            }
+impl SharedRegistry {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            registries: Mutex::new(HashMap::new()),
+            requests: Mutex::new(Vec::new()),
+            failure: Mutex::new(None),
+            epoch: uuid::Uuid::new_v4(),
+            revision: AtomicU64::new(1),
+            creates: AtomicU64::new(0),
+            focuses: AtomicU64::new(0),
         })
-        .await
-        .expect("terminal calls should complete");
+    }
+
+    fn registry(&self, source: &Source) -> Arc<InMemoryRegistry> {
+        self.registries
+            .lock()
+            .unwrap()
+            .entry(source.clone())
+            .or_insert_with(|| Arc::new(InMemoryRegistry::new()))
+            .clone()
+    }
+
+    async fn close(&self, source: &Source, pane: &str) {
+        self.registry(source)
+            .apply_event(SessionEvent::PaneClosed {
+                pane_session_id: pane.into(),
+            })
+            .await;
+        self.revision.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-struct Harness {
+#[async_trait::async_trait(?Send)]
+impl SshRegistryClient for SharedRegistry {
+    async fn request(&self, request: Request) -> Result<Snapshot> {
+        let request: Request = serde_json::from_value(serde_json::to_value(request)?)?;
+        self.requests.lock().unwrap().push(request.clone());
+        if let Some(error) = self.failure.lock().unwrap().take() {
+            anyhow::bail!("{error}");
+        }
+        let source = match &request {
+            Request::List { source, .. } | Request::Activate { source, .. } => source.clone(),
+        };
+        let registry = self.registry(&source);
+        match request {
+            Request::List {
+                refresh_history, ..
+            } => {
+                if refresh_history || registry.snapshot().await.is_empty() {
+                    registry.upsert_if_absent(history(&source)).await;
+                }
+            }
+            Request::Activate { session_id, .. } => {
+                if registry
+                    .apply_event(SessionEvent::ResumeDispatched {
+                        key: session_id.clone(),
+                    })
+                    .await
+                {
+                    self.creates.fetch_add(1, Ordering::SeqCst);
+                    registry
+                        .apply_event(SessionEvent::ResumePaneAssigned {
+                            key: session_id,
+                            pane_session_id: uuid::Uuid::new_v4().to_string(),
+                        })
+                        .await;
+                    self.revision.fetch_add(1, Ordering::SeqCst);
+                } else {
+                    self.focuses.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        Ok(Snapshot {
+            source,
+            epoch: self.epoch,
+            revision: self.revision.load(Ordering::SeqCst),
+            sessions: registry.snapshot().await,
+        })
+    }
+}
+
+fn source(name: &str) -> Source {
+    Source {
+        target: crate::ssh_sessions::SshTarget::new(name, None).unwrap(),
+        agent_id: "copilot".into(),
+    }
+}
+
+fn history(source: &Source) -> SessionInfo {
+    let mut info = SessionInfo::new("same-id".into(), "/home/me/project".into());
+    info.title = Some("Remote conversation".into());
+    info.status = Some(AgentStatus::Historical);
+    info.origin = Some(SessionOrigin::Unknown);
+    info.cli_source = CliSource::from_agent_id(&source.agent_id);
+    info.location = SessionLocation::Ssh {
+        target: source.target.clone(),
+    };
+    info
+}
+
+struct Helper {
     app: App,
-    terminal: Arc<MockTerminal>,
     events: mpsc::UnboundedReceiver<AppEvent>,
     master: mpsc::UnboundedReceiver<crate::protocol::acp::client::MasterExtRequest>,
+    tab: String,
 }
 
-impl Harness {
-    fn new(replies: Vec<Reply>) -> Self {
+impl Helper {
+    fn new(tab: &str, source: &Source, registry: &Arc<SharedRegistry>) -> Self {
         let (mut app, master) = test_app_with_master_rx();
-        app.current_agent_id = "copilot".into();
+        app.owner_tab_id = Some(tab.into());
+        app.tab_id = Some(tab.into());
+        app.current_agent_id = source.agent_id.clone();
         app.state = ConnectionState::Connected;
-        let terminal = Arc::new(MockTerminal {
-            calls: Mutex::new(Vec::new()),
-            replies: Mutex::new(replies.into()),
-            called: tokio::sync::Notify::new(),
-        });
-        app.shell_mgr =
-            Arc::new(crate::shell::ShellManager::new().with_wt_channel(terminal.clone()));
+        app.show_welcome_hint = false;
         let (sender, events) = mpsc::unbounded_channel();
         app.event_tx = Some(sender);
-        show_source(
-            &mut app,
-            &source("remote"),
-            vec![history(&source("remote"))],
+        app.ssh_resumes.client = Some(registry.clone());
+        app.set_initial_sessions_ssh_profile(
+            Some(source.target.destination()),
+            source.target.port(),
+            None,
         );
         Self {
             app,
-            terminal,
             events,
             master,
+            tab: tab.to_string(),
         }
+    }
+
+    async fn next(&mut self) {
+        let event = tokio::time::timeout(Duration::from_secs(2), self.events.recv())
+            .await
+            .expect("shared registry response timed out")
+            .expect("event channel closed");
+        self.app.handle_event(event);
+    }
+
+    async fn open(&mut self) {
+        self.app.open_agents_view_for_tab(self.tab.clone());
+        self.next().await;
     }
 
     fn enter(&mut self) {
@@ -119,427 +167,275 @@ impl Harness {
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
 
-    async fn next_event(&mut self) {
-        let event = tokio::time::timeout(Duration::from_secs(2), self.events.recv())
-            .await
-            .expect("resume event timed out")
-            .expect("event channel closed");
-        self.app.handle_event(event);
-    }
-
     fn row(&self) -> AgentSession {
         self.app
-            .agents_rows_for_tab(DEFAULT_TAB_ID)
+            .agents_rows_for_tab(&self.tab)
             .into_iter()
             .next()
             .unwrap()
     }
-
-    fn close_pane(&mut self, pane_id: &str, state: &str) {
-        self.app.handle_event(AppEvent::WtEvent {
-            method: "connection_state".into(),
-            pane_id: pane_id.to_string(),
-            tab_id: Some("resumed-tab".into()),
-            params: json!({ "state": state }),
-        });
-    }
-}
-
-fn source(destination: &str) -> ssh_session_view::SshSessionsSource {
-    ssh_session_view::SshSessionsSource {
-        target: SshTarget::new(destination, None).unwrap(),
-        agent_id: "copilot".into(),
-    }
-}
-
-fn history(source: &ssh_session_view::SshSessionsSource) -> AgentSession {
-    let mut info =
-        agent_client_protocol::schema::v1::SessionInfo::new("same-id", "/home/me/project");
-    info.title = Some("Remote conversation".into());
-    crate::session_history::acp_session_to_agent_session(
-        &info,
-        SessionLocation::Ssh {
-            target: source.target.clone(),
-        },
-        &CliSource::parse(Some(&source.agent_id)),
-    )
-}
-
-fn show_source(
-    app: &mut App,
-    source: &ssh_session_view::SshSessionsSource,
-    rows: Vec<AgentSession>,
-) {
-    app.current_agent_id.clone_from(&source.agent_id);
-    let tab = app.current_tab_mut();
-    tab.current_view = View::Agents;
-    tab.agents_view.ssh_profile = super::ssh_profile::SessionsProfile::Ssh(source.target.clone());
-    tab.agents_view.ssh_source = Some(source.clone());
-    tab.agents_view.snapshot = Some(
-        rows.iter()
-            .map(crate::session_registry::agent_session_to_session_info)
-            .collect(),
-    );
-    tab.agents_list_state.select(Some(0));
-    tab.agents_view.focused_sid =
-        Some(agent_client_protocol::schema::v1::SessionId::new("same-id"));
-    tab.agents_view.refetch_in_flight = false;
-}
-
-fn refresh(app: &mut App, source: &ssh_session_view::SshSessionsSource, rows: Vec<AgentSession>) {
-    let tab = app.current_tab_mut();
-    tab.agents_view.refetch_in_flight = true;
-    tab.agents_view.latest_request_id = Some(42);
-    app.handle_event(AppEvent::SshSessionsLoaded {
-        tab_id: DEFAULT_TAB_ID.to_string(),
-        request_id: 42,
-        target: source.target.clone(),
-        agent_id: source.agent_id.clone(),
-        result: Ok(rows),
-    });
 }
 
 #[tokio::test]
-async fn successful_resume_displays_idle_with_unknown_origin_and_repeat_enter_focuses() {
+async fn new_ssh_helper_reads_idle_from_shared_registry_and_focuses_the_same_pane() {
     let _locale = crate::test_support::lock_locale();
     rust_i18n::set_locale("en-US");
-    let mut h = Harness::new(vec![created(PANE), focused(), focused()]);
-    h.enter();
-    assert!(h.app.ssh_resume_pending(&h.row()));
-    assert_eq!(h.row().status, AgentStatus::Historical);
-    h.enter();
-    h.next_event().await;
-    h.terminal.wait_calls(2).await;
-    let row = h.row();
-    assert_eq!(row.status, AgentStatus::Idle);
-    assert_eq!(row.pane_session_id.as_deref(), Some(PANE));
-    assert_eq!(row.origin, SessionOrigin::Unknown);
-    assert_eq!(h.app.agent_sessions.iter_sorted().len(), 0);
-    assert!(h.master.try_recv().is_err());
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let registry = SharedRegistry::new();
+            let source = source("wsl-ubuntu");
+            let mut first = Helper::new("tab-a", &source, &registry);
+            first.open().await;
+            assert_eq!(first.row().status, AgentStatus::Historical);
+            first.enter();
+            first.enter();
+            first.next().await;
+            let pane = first.row().pane_session_id.unwrap();
 
-    let snapshot = h.app.current_tab().agents_view.snapshot.as_ref().unwrap();
-    let json = serde_json::to_value(&snapshot[0]).unwrap();
-    assert_eq!(json["status"], "Idle");
-    assert_eq!(json["origin"], "Unknown");
-    assert_eq!(json["pane_session_id"], PANE);
+            let mut second = Helper::new("tab-b", &source, &registry);
+            second.open().await;
+            assert_eq!(second.row().status, AgentStatus::Idle);
+            assert_eq!(second.row().pane_session_id.as_deref(), Some(pane.as_str()));
+            assert_eq!(second.row().origin, SessionOrigin::Unknown);
+            assert!(first.app.agent_sessions.iter_sorted().is_empty());
+            assert!(second.app.agent_sessions.iter_sorted().is_empty());
+            assert!(first.master.try_recv().is_err());
+            assert!(second.master.try_recv().is_err());
 
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 12)).unwrap();
-    terminal
-        .draw(|frame| crate::ui::render(frame, &mut h.app))
-        .unwrap();
-    let text: String = terminal
-        .backend()
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect();
-    assert!(text.contains("Remote conversation"));
-    assert!(text.contains("Idle"));
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 12)).unwrap();
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut second.app))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("Idle") && text.contains("Remote conversation"));
+            second.enter();
+            second.next().await;
+            assert_eq!(registry.creates.load(Ordering::SeqCst), 1);
+            assert_eq!(registry.focuses.load(Ordering::SeqCst), 1);
+        })
+        .await;
+}
 
-    h.enter();
-    h.terminal.wait_calls(3).await;
-    let calls = h.terminal.calls.lock().unwrap();
+#[tokio::test]
+async fn shared_binding_outlives_original_helper_and_close_updates_another_helper() {
+    let _locale = crate::test_support::lock_locale();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let registry = SharedRegistry::new();
+            let source = source("wsl-ubuntu");
+            let mut first = Helper::new("tab-a", &source, &registry);
+            first.open().await;
+            first.enter();
+            first.next().await;
+            let pane = first.row().pane_session_id.unwrap();
+            drop(first);
+            let mut second = Helper::new("tab-b", &source, &registry);
+            second.open().await;
+            assert_eq!(second.row().status, AgentStatus::Idle);
+
+            registry.close(&source, &pane).await;
+            second
+                .app
+                .handle_event(AppEvent::SshSessionsChanged(source.clone()));
+            second.next().await;
+            assert_eq!(second.row().status, AgentStatus::Ended);
+            assert!(second.row().pane_session_id.is_none());
+            assert!(matches!(
+                registry.requests.lock().unwrap().last().unwrap(),
+                Request::List {
+                    refresh_history: false,
+                    ..
+                }
+            ));
+            second.enter();
+            second.next().await;
+            assert_eq!(second.row().status, AgentStatus::Idle);
+            assert_ne!(second.row().pane_session_id.as_deref(), Some(pane.as_str()));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn shared_history_refresh_and_reopen_keep_idle_without_local_binding_authority() {
+    let _locale = crate::test_support::lock_locale();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let registry = SharedRegistry::new();
+            let source = source("wsl-ubuntu");
+            let mut helper = Helper::new("tab-a", &source, &registry);
+            helper.open().await;
+            helper.enter();
+            helper.next().await;
+            let pane = helper.row().pane_session_id;
+            helper
+                .app
+                .handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE));
+            helper.next().await;
+            assert_eq!(helper.row().status, AgentStatus::Idle);
+            helper.app.close_agents_view_for_tab(&helper.tab);
+            helper.open().await;
+            assert_eq!(helper.row().pane_session_id, pane);
+            assert_eq!(helper.row().status, AgentStatus::Idle);
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn independent_helpers_do_not_share_bindings_between_ssh_sources() {
+    let _locale = crate::test_support::lock_locale();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let registry = SharedRegistry::new();
+            let own = source("yuazha@ubuntu");
+            let mut first = Helper::new("first", &own, &registry);
+            first.open().await;
+            first.enter();
+            first.next().await;
+            for other in [
+                source("yuazha@debian"),
+                source("other@ubuntu"),
+                Source {
+                    target: crate::ssh_sessions::SshTarget::new("yuazha@ubuntu", Some(2222))
+                        .unwrap(),
+                    agent_id: "copilot".into(),
+                },
+                Source {
+                    target: own.target.clone(),
+                    agent_id: "claude".into(),
+                },
+            ] {
+                let mut second = Helper::new("second", &other, &registry);
+                second.open().await;
+                assert_eq!(second.row().key, first.row().key);
+                assert_eq!(second.row().status, AgentStatus::Historical);
+                assert!(second.row().pane_session_id.is_none());
+            }
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn failed_shared_activation_is_retryable_and_its_error_survives_cached_polling() {
+    let _locale = crate::test_support::lock_locale();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let registry = SharedRegistry::new();
+            let source = source("ubuntu");
+            let mut helper = Helper::new("first", &source, &registry);
+            helper.open().await;
+            *registry.failure.lock().unwrap() = Some("native creation failed".into());
+            helper.enter();
+            helper.next().await;
+            helper.next().await;
+            assert_eq!(helper.row().status, AgentStatus::Historical);
+            assert!(!helper.app.ssh_resume_pending(&helper.row()));
+            assert!(helper
+                .app
+                .current_tab()
+                .agents_view
+                .ssh_error
+                .as_deref()
+                .unwrap()
+                .contains("native creation failed"));
+            helper.enter();
+            helper.next().await;
+            assert_eq!(helper.row().status, AgentStatus::Idle);
+            assert!(helper.app.current_tab().agents_view.ssh_error.is_none());
+        })
+        .await;
+}
+
+#[test]
+fn snapshot_revisions_and_master_epochs_reject_stale_idle_history() {
+    let source = source("ubuntu");
+    let epoch = uuid::Uuid::new_v4();
+    let make = |revision, status| {
+        let mut row = history(&source);
+        row.status = Some(status);
+        Snapshot {
+            source: source.clone(),
+            epoch,
+            revision,
+            sessions: vec![row],
+        }
+    };
+    let mut cache = SshResumes::default();
+    cache.accept(make(2, AgentStatus::Idle), 2).unwrap();
+    cache.accept(make(1, AgentStatus::Historical), 3).unwrap();
     assert_eq!(
-        calls
-            .iter()
-            .filter(|(method, _)| method == "create_tab")
-            .count(),
-        1
+        cache.snapshots[&source].snapshot.sessions[0].status,
+        Some(AgentStatus::Idle)
     );
+    let mut replacement = make(0, AgentStatus::Historical);
+    replacement.epoch = uuid::Uuid::new_v4();
+    cache.accept(replacement.clone(), 4).unwrap();
+    cache.accept(make(9, AgentStatus::Idle), 5).unwrap();
+    assert_eq!(cache.snapshots[&source].snapshot.epoch, replacement.epoch);
     assert_eq!(
-        calls.last().unwrap(),
-        &("focus_pane".into(), json!({ "session_id": PANE }))
+        cache.snapshots[&source].snapshot.sessions[0].status,
+        Some(AgentStatus::Historical)
     );
-    assert!(calls[0].1["commandline"]
-        .as_str()
-        .unwrap()
-        .contains("ssh.exe"));
-    assert!(calls[0].1.get("cwd").is_none());
-    assert!(h.master.try_recv().is_err());
+}
+
+#[test]
+fn shared_snapshot_validation_rejects_cross_source_or_cross_agent_rows() {
+    let source = source("ubuntu");
+    let mut cache = SshResumes::default();
+    let mut row = history(&source);
+    row.location = SessionLocation::Host;
+    let snapshot = Snapshot {
+        source: source.clone(),
+        epoch: uuid::Uuid::new_v4(),
+        revision: 1,
+        sessions: vec![row],
+    };
+    assert!(cache.accept(snapshot, 1).is_err());
+    let mut row = history(&source);
+    row.cli_source = Some(CliSource::Claude);
+    assert!(cache
+        .accept(
+            Snapshot {
+                source,
+                epoch: uuid::Uuid::new_v4(),
+                revision: 1,
+                sessions: vec![row]
+            },
+            2
+        )
+        .is_err());
 }
 
 #[tokio::test]
-async fn refresh_and_reopen_preserve_the_live_binding_even_if_history_temporarily_omits_it() {
+async fn cached_polling_updates_open_helpers_without_rescanning_remote_history() {
     let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![created(PANE), focused()]);
-    h.enter();
-    h.next_event().await;
-    refresh(
-        &mut h.app,
-        &source("remote"),
-        vec![history(&source("remote"))],
-    );
-    assert_eq!(h.row().status, AgentStatus::Idle);
-    assert_eq!(h.row().pane_session_id.as_deref(), Some(PANE));
-    refresh(&mut h.app, &source("remote"), Vec::new());
-    assert_eq!(h.row().status, AgentStatus::Idle);
-
-    h.app.close_agents_view_for_tab(DEFAULT_TAB_ID);
-    h.app.current_tab_mut().agents_view.refetch_in_flight = true;
-    h.app.open_agents_view_for_tab(DEFAULT_TAB_ID.to_string());
-    assert_eq!(h.row().status, AgentStatus::Idle);
-    assert_eq!(h.app.current_tab().agents_list_state.selected(), Some(0));
-    assert!(h.master.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn create_failure_releases_pending_state_and_allows_retry_without_false_idle() {
-    let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![
-        failed("create_tab", "creation failed"),
-        created(PANE),
-        focused(),
-    ]);
-    h.enter();
-    h.next_event().await;
-    assert!(!h.app.ssh_resume_pending(&h.row()));
-    assert_eq!(h.row().status, AgentStatus::Historical);
-    assert!(h.row().pane_session_id.is_none());
-    assert!(h
-        .app
-        .current_tab()
-        .agents_view
-        .ssh_error
-        .as_deref()
-        .unwrap()
-        .contains("creation failed"));
-    h.enter();
-    h.next_event().await;
-    assert_eq!(h.row().status, AgentStatus::Idle);
-    assert!(h.app.current_tab().agents_view.ssh_error.is_none());
-}
-
-#[tokio::test]
-async fn malformed_creation_responses_do_not_publish_idle_or_focus_an_arbitrary_pane() {
-    let _locale = crate::test_support::lock_locale();
-    for response in [
-        json!({}),
-        json!({ "session_id": "" }),
-        json!({ "session_id": "-t" }),
-        json!({ "session_id": 1 }),
-        json!({ "session_id": uuid::Uuid::nil().to_string() }),
-    ] {
-        let mut h = Harness::new(vec![Reply {
-            method: "create_tab",
-            result: Ok(response),
-        }]);
-        h.enter();
-        h.next_event().await;
-        assert_eq!(h.row().status, AgentStatus::Historical);
-        assert!(h.row().pane_session_id.is_none());
-        assert!(h.app.current_tab().agents_view.ssh_error.is_some());
-        assert!(h.app.ssh_resumes.bindings.is_empty());
-        assert_eq!(h.terminal.calls.lock().unwrap().len(), 1);
-    }
-}
-
-#[tokio::test]
-async fn native_close_or_failure_ends_only_the_bound_remote_pane_and_allows_resume() {
-    let _locale = crate::test_support::lock_locale();
-    for state in ["closed", "failed"] {
-        let mut h = Harness::new(vec![
-            created(PANE),
-            focused(),
-            created(OTHER_PANE),
-            focused(),
-        ]);
-        h.enter();
-        h.next_event().await;
-        h.close_pane(OTHER_PANE, state);
-        assert_eq!(h.row().status, AgentStatus::Idle);
-        h.close_pane(PANE, state);
-        assert_eq!(h.row().status, AgentStatus::Ended);
-        assert!(h.row().pane_session_id.is_none());
-        refresh(
-            &mut h.app,
-            &source("remote"),
-            vec![history(&source("remote"))],
-        );
-        assert_eq!(h.row().status, AgentStatus::Ended);
-        h.enter();
-        h.next_event().await;
-        assert_eq!(h.row().status, AgentStatus::Idle);
-        assert_eq!(h.row().pane_session_id.as_deref(), Some(OTHER_PANE));
-    }
-}
-
-#[tokio::test]
-async fn closure_before_creation_reply_cannot_resurrect_a_dead_pane() {
-    let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![created(PANE), focused()]);
-    h.enter();
-    h.close_pane(&format!("{{{PANE}}}"), "closed");
-    h.next_event().await;
-    assert_eq!(h.row().status, AgentStatus::Ended);
-    assert!(h.row().pane_session_id.is_none());
-    assert!(h.app.ssh_resumes.closed_while_launching.is_empty());
-}
-
-#[tokio::test]
-async fn focus_infrastructure_failure_preserves_idle_but_missing_pane_ends_it() {
-    let _locale = crate::test_support::lock_locale();
-    for (message, status) in [
-        ("RPC unavailable", AgentStatus::Idle),
-        ("FocusPane failed: 0x80070490", AgentStatus::Ended),
-    ] {
-        let mut h = Harness::new(vec![
-            created(PANE),
-            focused(),
-            failed("focus_pane", message),
-        ]);
-        h.enter();
-        h.next_event().await;
-        h.terminal.wait_calls(2).await;
-        h.enter();
-        h.next_event().await;
-        assert_eq!(h.row().status, status);
-        assert_eq!(
-            h.row().pane_session_id.is_some(),
-            status == AgentStatus::Idle
-        );
-        assert!(h
-            .app
-            .current_tab()
-            .agents_view
-            .ssh_error
-            .as_deref()
-            .unwrap()
-            .contains(message));
-        assert!(h.master.try_recv().is_err());
-    }
-}
-
-#[tokio::test]
-async fn automatic_focus_failure_keeps_the_created_pane_bound() {
-    let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![created(PANE), failed("focus_pane", "focus failed")]);
-    h.enter();
-    h.next_event().await;
-    h.next_event().await;
-    assert_eq!(h.row().status, AgentStatus::Idle);
-    assert_eq!(h.row().pane_session_id.as_deref(), Some(PANE));
-    assert!(h
-        .app
-        .current_tab()
-        .agents_view
-        .ssh_error
-        .as_deref()
-        .unwrap()
-        .contains("focus failed"));
-}
-
-#[tokio::test]
-async fn late_completion_after_source_switch_never_changes_the_foreign_view() {
-    let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![created(PANE), focused()]);
-    h.enter();
-    let foreign = source("other-host");
-    show_source(&mut h.app, &foreign, vec![history(&foreign)]);
-    h.next_event().await;
-    assert_eq!(h.row().status, AgentStatus::Historical);
-    assert!(h.row().pane_session_id.is_none());
-    assert!(h.app.current_tab().agents_view.ssh_error.is_none());
-    show_source(
-        &mut h.app,
-        &source("remote"),
-        vec![history(&source("remote"))],
-    );
-    h.app.refresh_ssh_resume_snapshots();
-    assert_eq!(h.row().status, AgentStatus::Idle);
-}
-
-#[tokio::test]
-async fn binding_identity_includes_host_port_agent_and_session_not_just_session_id() {
-    let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![created(PANE), focused()]);
-    h.enter();
-    h.next_event().await;
-    for foreign in [
-        source("other-host"),
-        ssh_session_view::SshSessionsSource {
-            target: SshTarget::new("remote", Some(2222)).unwrap(),
-            agent_id: "copilot".into(),
-        },
-        ssh_session_view::SshSessionsSource {
-            target: SshTarget::new("remote", None).unwrap(),
-            agent_id: "claude".into(),
-        },
-    ] {
-        show_source(&mut h.app, &foreign, vec![history(&foreign)]);
-        h.app.refresh_ssh_resume_snapshots();
-        assert_eq!(h.row().status, AgentStatus::Historical);
-        assert!(h.row().pane_session_id.is_none());
-    }
-    let own = source("remote");
-    let mut another = history(&own);
-    another.key = "different-id".to_string();
-    show_source(&mut h.app, &own, vec![another]);
-    h.app.refresh_ssh_resume_snapshots();
-    let rows = h.app.agents_rows_for_tab(DEFAULT_TAB_ID);
-    assert_eq!(
-        rows.iter()
-            .find(|row| row.key == "different-id")
-            .unwrap()
-            .status,
-        AgentStatus::Historical
-    );
-    assert_eq!(
-        rows.iter().find(|row| row.key == "same-id").unwrap().status,
-        AgentStatus::Idle
-    );
-    assert!(h.master.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn old_operation_results_cannot_overwrite_a_replacement_binding() {
-    let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![
-        created(PANE),
-        focused(),
-        created(OTHER_PANE),
-        focused(),
-    ]);
-    h.enter();
-    h.next_event().await;
-    let key = SshSessionKey::from_session(&h.row()).unwrap();
-    let old_id = h.app.ssh_resumes.bindings[&key].operation_id;
-    h.close_pane(PANE, "closed");
-    h.enter();
-    h.app.handle_event(AppEvent::SshSessionResumeCompleted {
-        key: key.clone(),
-        operation_id: old_id,
-        outcome: SshResumeOutcome::Created(Err("stale creation".into())),
-    });
-    assert!(h.app.ssh_resume_pending(&h.row()));
-    h.next_event().await;
-    h.app.handle_event(AppEvent::SshSessionResumeCompleted {
-        key,
-        operation_id: old_id,
-        outcome: SshResumeOutcome::FocusFailed {
-            pane_id: PANE.into(),
-            error: "0x80070490".into(),
-        },
-    });
-    assert_eq!(h.row().status, AgentStatus::Idle);
-    assert_eq!(h.row().pane_session_id.as_deref(), Some(OTHER_PANE));
-}
-
-#[tokio::test]
-async fn binding_survives_owner_tab_rename_and_closing_the_view() {
-    let _locale = crate::test_support::lock_locale();
-    let mut h = Harness::new(vec![created(PANE), focused()]);
-    h.enter();
-    h.app.owner_tab_id = Some(DEFAULT_TAB_ID.into());
-    h.app.tab_id = Some(DEFAULT_TAB_ID.into());
-    h.app
-        .rename_tab_session(DEFAULT_TAB_ID, "renamed-tab", Some("new-window"));
-    h.next_event().await;
-    let rows = h.app.agents_rows_for_tab("renamed-tab");
-    assert_eq!(rows[0].status, AgentStatus::Idle);
-    h.app.close_agents_view_for_tab("renamed-tab");
-    h.close_pane(PANE, "closed");
-    let binding = h.app.ssh_resumes.bindings.values().next().unwrap();
-    assert!(matches!(binding.phase, ResumePhase::Ended));
-    assert!(binding.session.pane_session_id.is_none());
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let registry = SharedRegistry::new();
+            let source = source("ubuntu");
+            let mut first = Helper::new("first", &source, &registry);
+            let mut second = Helper::new("second", &source, &registry);
+            first.open().await;
+            second.open().await;
+            first.enter();
+            first.next().await;
+            second.app.ssh_resumes.last_poll = None;
+            second.app.handle_event(AppEvent::Tick);
+            second.next().await;
+            assert_eq!(second.row().status, AgentStatus::Idle);
+            assert!(matches!(
+                registry.requests.lock().unwrap().last().unwrap(),
+                Request::List {
+                    refresh_history: false,
+                    ..
+                }
+            ));
+        })
+        .await;
 }

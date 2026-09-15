@@ -89,7 +89,7 @@ use autofix::*;
 pub use crate::turn_context::TurnContext;
 #[cfg(test)]
 use input_edit::{next_word_boundary, prev_word_boundary, INPUT_HISTORY_MAX_ENTRIES};
-pub(crate) use ssh_resume::{SshResumeOutcome, SshSessionKey};
+pub(crate) use ssh_resume::SshRegistryAction;
 pub use tab_state::{
     ChatMessage, CompletedTurn, ConfigPickerState, NoticeKind, PermissionState,
     RecommendationFocus, TabSession, ToolCallContent, ToolCallKind, ToolCallLocation,
@@ -2991,7 +2991,9 @@ impl App {
                     s.location,
                     crate::agent_sessions::SessionLocation::Ssh { .. }
                 ) {
-                    self.dispatch_ssh_session_focus(s, &pane_session_id);
+                    if let crate::agent_sessions::SessionLocation::Ssh { target } = &s.location {
+                        self.dispatch_ssh_session_resume(s, target);
+                    }
                 } else {
                     self.dispatch_focus_pane(&pane_session_id, &s.key);
                 }
@@ -4894,8 +4896,8 @@ impl App {
             AppEvent::SessionsChanged => "sessions_changed",
             AppEvent::AgentsSnapshotLoaded { .. } => "agents_snapshot_loaded",
             AppEvent::AgentsSnapshotFailed { .. } => "agents_snapshot_failed",
-            AppEvent::SshSessionsLoaded { .. } => "ssh_sessions_loaded",
-            AppEvent::SshSessionResumeCompleted { .. } => "ssh_session_resume_completed",
+            AppEvent::SshRegistryResult { .. } => "ssh_registry_result",
+            AppEvent::SshSessionsChanged(_) => "ssh_sessions_changed",
             AppEvent::RegisterBornBoundSession { .. } => "register_born_bound_session",
             AppEvent::MasterMutationCompleted { .. } => "master_mutation_completed",
             AppEvent::DirectTerminalActionProposal { .. } => "direct_terminal_action_proposal",

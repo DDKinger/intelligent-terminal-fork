@@ -5,11 +5,7 @@ use super::*;
 use crate::agent_sessions::{AgentSession, CliSource, SessionLocation};
 use crate::ssh_sessions::SshTarget;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SshSessionsSource {
-    pub target: SshTarget,
-    pub agent_id: String,
-}
+pub(crate) use crate::ssh_session_registry::Source as SshSessionsSource;
 
 #[cfg(test)]
 mod tests {
@@ -56,13 +52,13 @@ mod tests {
         request_id: u64,
         rows: Vec<AgentSession>,
     ) {
-        app.handle_event(AppEvent::SshSessionsLoaded {
-            tab_id: tab_id.to_string(),
+        app.handle_ssh_sessions_loaded(
+            tab_id,
             request_id,
-            target: source.target.clone(),
-            agent_id: source.agent_id.clone(),
-            result: Ok(rows),
-        });
+            &source.target,
+            &source.agent_id,
+            Ok(rows),
+        );
     }
 
     #[test]
@@ -247,8 +243,8 @@ mod tests {
         assert_eq!(app.current_tab().current_view, View::Chat);
     }
 
-    #[tokio::test]
-    async fn ssh_resume_uses_remote_cli_without_mutating_same_id_host_session() {
+    #[test]
+    fn ssh_resume_without_master_does_not_launch_locally_or_mutate_host_session() {
         let _locale = crate::test_support::lock_locale();
         let (mut app, mut master_rx) = test_app_with_master_rx();
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
@@ -267,17 +263,15 @@ mod tests {
         remote.origin = SessionOrigin::AgentPane;
         app.activate_agent_session_routed(&remote);
 
-        let dispatched = app.last_dispatched_command.as_ref().unwrap();
-        assert!(matches!(
-            dispatched.kind,
-            DispatchedCommandKind::NewTabResume
-        ));
-        assert_eq!(dispatched.argv[0], "new-tab");
-        assert!(!dispatched.argv.iter().any(|arg| arg == "-d"));
-        assert!(!dispatched.argv[2].contains("cmd /c"));
-        assert!(dispatched.argv[2].contains("ssh"));
-        assert!(dispatched.argv[2].contains("remote"));
-        assert!(dispatched.argv[2].contains("/home/test/project"));
+        assert!(app.last_dispatched_command.is_none());
+        assert!(app
+            .current_tab()
+            .agents_view
+            .ssh_error
+            .as_deref()
+            .unwrap()
+            .contains("master"));
+        assert!(!app.ssh_resume_pending(&remote));
         assert!(master_rx.try_recv().is_err());
         let host = app.agent_sessions.get(&key).unwrap();
         assert_eq!(host.location, SessionLocation::Host);
@@ -417,23 +411,16 @@ impl App {
             );
             return;
         }
-        let Some(event_tx) = self.event_tx.clone() else {
-            return;
-        };
-        let owner_tab = tab_id.to_string();
-        let task = tokio::task::spawn_local(async move {
-            let result = crate::ssh_sessions::list_sessions(&source.target, &source.agent_id)
-                .await
-                .map_err(|error| format!("{error:#}"));
-            let _ = event_tx.send(AppEvent::SshSessionsLoaded {
-                tab_id: owner_tab,
+        match self.request_ssh_history(tab_id, request_id, source.clone()) {
+            Ok(fetch) => self.tab_mut(tab_id).agents_view.ssh_fetch = Some(fetch),
+            Err(error) => self.handle_ssh_sessions_loaded(
+                tab_id,
                 request_id,
-                target: source.target,
-                agent_id: source.agent_id,
-                result,
-            });
-        });
-        self.tab_mut(tab_id).agents_view.ssh_fetch = Some(task.abort_handle());
+                &source.target,
+                &source.agent_id,
+                Err(format!("{error:#}")),
+            ),
+        }
     }
 
     pub(super) fn handle_ssh_sessions_loaded(
@@ -474,10 +461,7 @@ impl App {
             }
         });
         match result {
-            Ok(mut rows) => {
-                if let Some(source) = &tab.agents_view.ssh_source {
-                    self.ssh_resumes.merge_rows(&mut rows, source);
-                }
+            Ok(rows) => {
                 tab.agents_view.snapshot = Some(
                     rows.iter()
                         .map(crate::session_registry::agent_session_to_session_info)
@@ -520,13 +504,7 @@ impl App {
                     .is_some_and(|source| &source.target == target && source.agent_id == agent_id),
                 "SSH session does not belong to the selected source."
             );
-            let commandline = crate::ssh_sessions::resume_commandline(
-                target,
-                agent_id,
-                &session.key,
-                &session.cwd.to_string_lossy(),
-            )?;
-            self.start_ssh_session_resume(session, commandline)
+            self.start_ssh_session_resume(session)
         })();
         if let Err(error) = result {
             tracing::warn!(target: "ssh_sessions", %error, "SSH session resume failed");

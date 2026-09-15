@@ -276,13 +276,13 @@ fn ssh_profile_change_retires_old_requests_and_null_clears_the_default() {
         json!({ "destination": "new", "port": null }),
     );
     assert_ssh(&app, "new", None, "copilot");
-    app.handle_event(AppEvent::SshSessionsLoaded {
-        tab_id: "owner-tab".into(),
-        request_id: 19,
-        target: SshTarget::new("old", None).unwrap(),
-        agent_id: "copilot".into(),
-        result: Err("stale old-host failure".into()),
-    });
+    app.handle_ssh_sessions_loaded(
+        "owner-tab",
+        19,
+        &SshTarget::new("old", None).unwrap(),
+        "copilot",
+        Err("stale old-host failure".into()),
+    );
     assert_ne!(
         app.current_tab().agents_view.ssh_error.as_deref(),
         Some("stale old-host failure")

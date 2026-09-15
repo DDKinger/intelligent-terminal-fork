@@ -1013,6 +1013,7 @@ async fn run_acp_app(
             // SSH history may start before the chat connection or local setup
             // completes, so its snapshot task needs the event sender now.
             app_state.set_event_tx(event_tx.clone());
+            app_state.set_sessions_master_pipe(connect_master_pipe.clone());
             if config.sessions_ssh_target.is_some() && app_state.current_agent_id.is_empty() {
                 app_state.current_agent_id = canonical_agent_id.clone();
             }

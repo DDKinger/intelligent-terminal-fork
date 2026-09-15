@@ -711,6 +711,7 @@ impl App {
                 );
             }
             AppEvent::Tick => {
+                self.poll_shared_ssh_sessions();
                 // Fan out across all tabs: a background tab with an in-flight
                 // prompt should keep its shimmer phase advancing so when the
                 // user switches back the animation is in step.
@@ -2565,21 +2566,16 @@ impl App {
             AppEvent::AgentsSnapshotFailed { request_id } => {
                 self.handle_agents_snapshot_failed(request_id);
             }
-            AppEvent::SshSessionsLoaded {
-                tab_id,
-                request_id,
-                target,
-                agent_id,
+            AppEvent::SshRegistryResult {
+                source,
+                sequence,
+                action,
                 result,
             } => {
-                self.handle_ssh_sessions_loaded(&tab_id, request_id, &target, &agent_id, result);
+                self.handle_ssh_registry_result(source, sequence, action, result);
             }
-            AppEvent::SshSessionResumeCompleted {
-                key,
-                operation_id,
-                outcome,
-            } => {
-                self.handle_ssh_resume_completed(key, operation_id, outcome);
+            AppEvent::SshSessionsChanged(source) => {
+                self.request_cached_ssh_source(&source);
             }
             AppEvent::RegisterBornBoundSession { event } => {
                 self.register_born_bound_session(event);
@@ -3523,9 +3519,6 @@ impl App {
                 // safe to apply unconditionally for non-own panes.
                 if method == "connection_state" {
                     let state = params.get("state").and_then(|v| v.as_str()).unwrap_or("");
-                    if matches!(state, "closed" | "failed") {
-                        self.ssh_resume_pane_closed(&pane_id);
-                    }
                     tracing::info!(
                         target: "helper_wt_event",
                         pane_id = %pane_id,

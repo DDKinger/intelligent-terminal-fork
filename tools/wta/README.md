@@ -97,8 +97,10 @@ behavior. This selects history only; it does not change the tab's chat backend.
 host or its normal Windows/WSL agent source; it cannot be overridden in the
 slash command. The remote history uses the currently selected built-in agent,
 subject to the existing agent policy.
-SSH history is isolated by destination, port, agent, and viewing tab; it is
-never merged into the local live-session registry. Typing `ssh` in a shell does
+SSH registries are shared by the master, using the same session registry and
+state reducer as Windows/WSL sessions, but isolated by destination, port, and
+agent so remote session IDs cannot collide with local or other SSH sources.
+Each viewing tab receives only its own profile's source. Typing `ssh` in a shell does
 not automatically change the Sessions source. Profile metadata is supplied
 when the helper starts, including prewarmed/stashed helpers, and refreshed by
 the owning tab's native Sessions/tab-change events.
@@ -106,16 +108,20 @@ the owning tab's native Sessions/tab-change events.
 The view shows the SSH destination above the list. Use the existing search and
 arrow keys, **F5** to fetch remote history again, and **Enter** to open a native
 Terminal tab running the remote agent's own resume command in the session's
-remote working directory. Remote history is fetched on entry and explicit
-refresh, not on local session-change broadcasts. Connection failures remain
+remote working directory. The master fetches remote history on entry and
+explicit refresh. Shared status notifications and periodic cached snapshots
+update other views without another remote history scan. Connection failures remain
 visible; a failed refresh keeps the last successful list rather than presenting
 an empty list as success.
 
 After Terminal confirms the resumed pane was created, its row shows **Idle**.
-Pressing Enter again focuses that pane instead of launching a duplicate. F5 and
-reopening the view preserve the binding; a failed creation remains retryable,
-and closing the pane or its SSH connection ends the binding. These bindings
-belong to the viewing helper and last for that helper's lifetime.
+The same row is Idle in other existing or newly opened tabs using the same SSH
+source. Pressing Enter from any of them focuses that pane instead of launching
+a duplicate. The master owns activation, so simultaneous requests cannot
+create two panes. F5 and reopening the view preserve the binding; a failed
+creation remains retryable, and closing the pane or its SSH connection ends
+the binding for every viewer. Closing the original viewing helper does not
+discard another pane's binding. Bindings last for the master's lifetime.
 
 `origin` and `status` are independent. Resuming from the Sessions view opens an
 ordinary SSH shell pane, not an ACP agent pane, so `origin` remains `Unknown`
@@ -130,8 +136,8 @@ wta sessions list --ssh dev@linux-host --cli copilot --json
 wta sessions list --ssh work-alias --port 2222 --cli copilot
 ```
 
-This standalone CLI reads remote history only; it does not query the viewing
-helper's in-memory pane bindings, so its rows remain `Historical`.
+This standalone diagnostic reads remote history only; it does not query the
+master's shared pane bindings, so its rows remain `Historical`.
 
 Requirements and boundaries:
 
