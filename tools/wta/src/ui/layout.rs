@@ -13,7 +13,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     app.completed_turn_action_links.clear();
     app.input_dialog_area = None;
     let ssh_sessions_view = app.current_tab().current_view == View::Agents
-        && app.current_tab().agents_view.ssh_source.is_some();
+        && app.current_tab().agents_view.is_ssh_source();
 
     // Auth mode: show auth screen above the input box
     if app.mode == AppMode::Auth && !ssh_sessions_view {
@@ -79,8 +79,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Some(source) => agents_view::render_ssh_source(
                 frame,
                 area,
-                &source.target,
+                Some(&source.target),
                 &source.agent_id,
+                tab.agents_view.ssh_error.as_deref(),
+            ),
+            None if tab.agents_view.is_ssh_source() => agents_view::render_ssh_source(
+                frame,
+                area,
+                None,
+                "",
                 tab.agents_view.ssh_error.as_deref(),
             ),
             None => area,

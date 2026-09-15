@@ -83,21 +83,25 @@ When `-t` (target pane) is omitted, the active pane is used automatically.
 
 ### Agent sessions over SSH
 
-The existing Sessions view can browse an explicitly selected Linux SSH host
-without changing the agent that serves the current tab's chat:
+The Sessions view automatically uses the SSH destination of its source terminal
+profile. Open a generated **SSH - ...** profile from the new-tab menu, then use
+the Sessions button, keyboard shortcut, or bare `/sessions` to browse that
+host's agent history. Windows and WSL profiles keep their existing agent-source
+behavior. This selects history only; it does not change the tab's chat backend.
 
 ```text
-/sessions ssh dev@linux-host
-/sessions ssh work-alias -p 2222 --cli copilot
 /sessions
 ```
 
-The SSH form defaults to the currently selected built-in agent. `--cli` selects
-another built-in agent for this history view, subject to the existing agent
-policy. Bare `/sessions` returns to the chat agent's normal Windows/WSL source.
+`/sessions` takes no arguments. The source is always the current profile's SSH
+host or its normal Windows/WSL agent source; it cannot be overridden in the
+slash command. The remote history uses the currently selected built-in agent,
+subject to the existing agent policy.
 SSH history is isolated by destination, port, agent, and viewing tab; it is
 never merged into the local live-session registry. Typing `ssh` in a shell does
-not automatically change the Sessions source.
+not automatically change the Sessions source. Profile metadata is supplied
+when the helper starts, including prewarmed/stashed helpers, and refreshed by
+the owning tab's native Sessions/tab-change events.
 
 The view shows the SSH destination above the list. Use the existing search and
 arrow keys, **F5** to fetch remote history again, and **Enter** to open a native
@@ -118,7 +122,8 @@ ordinary SSH shell pane, not an ACP agent pane, so `origin` remains `Unknown`
 while the bound row's `status` becomes `Idle`. Idle indicates a known local pane
 binding; it does not report the remote agent's tool activity.
 
-The same history is available without a running WTA master:
+For diagnostics, the standalone CLI can retrieve remote history without a
+running WTA master:
 
 ```powershell
 wta sessions list --ssh dev@linux-host --cli copilot --json
@@ -130,6 +135,11 @@ helper's in-memory pane bindings, so its rows remain `Historical`.
 
 Requirements and boundaries:
 
+- Automatic source selection recognizes generated SSH profiles and supported
+  direct `ssh`/`ssh.exe` profile command lines. For connection options that
+  cannot be represented as a destination/user/port, define an OpenSSH `Host`
+  alias and use `ssh <alias>` in the profile. An unsupported SSH profile shows
+  a source error instead of falling back to Windows history.
 - Windows OpenSSH uses the existing SSH configuration and keys. Establish a
   normal SSH connection first to verify the host key and configure key/agent
   authentication. Background listing uses batch authentication and strict host

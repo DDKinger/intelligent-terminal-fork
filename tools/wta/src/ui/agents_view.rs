@@ -30,7 +30,7 @@ const MUTED_WHITE: Color = Color::Rgb(0x8b, 0x8b, 0x8b); // timestamp
 pub(crate) fn render_ssh_source(
     frame: &mut Frame,
     mut area: Rect,
-    target: &crate::ssh_sessions::SshTarget,
+    target: Option<&crate::ssh_sessions::SshTarget>,
     agent_id: &str,
     error: Option<&str>,
 ) -> Rect {
@@ -38,8 +38,11 @@ pub(crate) fn render_ssh_source(
         return area;
     }
     frame.render_widget(
-        Paragraph::new(format!("SSH: {} ({agent_id})", target.display_name()))
-            .style(Style::default().fg(Color::Cyan)),
+        Paragraph::new(target.map_or_else(
+            || "SSH".to_string(),
+            |target| format!("SSH: {} ({agent_id})", target.display_name()),
+        ))
+        .style(Style::default().fg(Color::Cyan)),
         Rect { height: 1, ..area },
     );
     area.y = area.y.saturating_add(1);

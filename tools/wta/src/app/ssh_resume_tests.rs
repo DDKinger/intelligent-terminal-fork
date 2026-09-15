@@ -170,8 +170,10 @@ fn show_source(
     source: &ssh_session_view::SshSessionsSource,
     rows: Vec<AgentSession>,
 ) {
+    app.current_agent_id.clone_from(&source.agent_id);
     let tab = app.current_tab_mut();
     tab.current_view = View::Agents;
+    tab.agents_view.ssh_profile = super::ssh_profile::SessionsProfile::Ssh(source.target.clone());
     tab.agents_view.ssh_source = Some(source.clone());
     tab.agents_view.snapshot = Some(
         rows.iter()

@@ -1,57 +1,14 @@
-//! Explicit SSH history browsing, isolated from the helper's chat agent and
+//! Profile-selected SSH history browsing, isolated from the helper's chat agent and
 //! the master's host/WSL registry.
 
 use super::*;
 use crate::agent_sessions::{AgentSession, CliSource, SessionLocation};
 use crate::ssh_sessions::SshTarget;
 
-const USAGE: &str = "/sessions [ssh <destination> [-p <port>] [--cli <agent>]]";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SshSessionsSource {
     pub target: SshTarget,
     pub agent_id: String,
-}
-
-fn parse_source(arguments: &str, current_agent: &str) -> Result<Option<SshSessionsSource>> {
-    let mut words = arguments.split_whitespace();
-    let Some(kind) = words.next() else {
-        return Ok(None);
-    };
-    anyhow::ensure!(kind == "ssh", "{USAGE}");
-    let destination = words.next().ok_or_else(|| anyhow::anyhow!(USAGE))?;
-    let mut port = None;
-    let mut agent_id = None;
-    while let Some(option) = words.next() {
-        match option {
-            "-p" | "--port" if port.is_none() => {
-                port = Some(
-                    words
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!(USAGE))?
-                        .parse::<u16>()?,
-                );
-            }
-            "--cli" if agent_id.is_none() => {
-                agent_id = Some(
-                    words
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!(USAGE))?
-                        .to_ascii_lowercase(),
-                );
-            }
-            _ => anyhow::bail!("{USAGE}"),
-        }
-    }
-    let agent_id = agent_id.unwrap_or_else(|| current_agent.to_ascii_lowercase());
-    anyhow::ensure!(
-        crate::agent_registry::is_known_id(&agent_id),
-        "SSH sessions require a built-in agent; select one with --cli."
-    );
-    Ok(Some(SshSessionsSource {
-        target: SshTarget::new(destination, port)?,
-        agent_id,
-    }))
 }
 
 #[cfg(test)]
@@ -81,8 +38,11 @@ mod tests {
     }
 
     fn prepare(app: &mut App, tab_id: &str, source: &SshSessionsSource, request_id: u64) {
+        app.current_agent_id.clone_from(&source.agent_id);
         let tab = app.tab_mut(tab_id);
         tab.current_view = View::Agents;
+        tab.agents_view.ssh_profile =
+            super::ssh_profile::SessionsProfile::Ssh(source.target.clone());
         tab.agents_view.ssh_source = Some(source.clone());
         tab.agents_view.snapshot = Some(Vec::new());
         tab.agents_view.refetch_in_flight = true;
@@ -103,96 +63,6 @@ mod tests {
             agent_id: source.agent_id.clone(),
             result: Ok(rows),
         });
-    }
-
-    #[test]
-    fn ssh_source_parser_keeps_host_port_and_agent_separate() {
-        let parsed = parse_source("ssh user@host -p 2222 --cli Claude", "copilot")
-            .unwrap()
-            .unwrap();
-        assert_eq!(parsed.target.destination(), "user@host");
-        assert_eq!(parsed.target.port(), Some(2222));
-        assert_eq!(parsed.agent_id, "claude");
-        assert_eq!(
-            parse_source("ssh work", "copilot").unwrap(),
-            Some(source("work"))
-        );
-        assert_eq!(parse_source("", "copilot").unwrap(), None);
-    }
-
-    #[test]
-    fn ssh_source_parser_rejects_ambiguous_or_unsafe_arguments() {
-        for arguments in [
-            "ssh",
-            "host",
-            "ssh host command",
-            "ssh host -p",
-            "ssh host -p 0",
-            "ssh host -p 65536",
-            "ssh host -p 22 -p 23",
-            "ssh host --cli unknown",
-            "ssh host --cli copilot --cli claude",
-            "ssh -oProxyCommand=whoami",
-        ] {
-            assert!(parse_source(arguments, "copilot").is_err(), "{arguments}");
-        }
-        assert!(parse_source("ssh host", "custom:private").is_err());
-    }
-
-    #[test]
-    fn ssh_source_selection_does_not_rebind_the_chat_agent() {
-        let _locale = crate::test_support::lock_locale();
-        let (mut app, mut master_rx) = test_app_with_master_rx();
-        app.current_agent_id = "copilot".to_string();
-        app.current_agent_source = crate::agent_source::AgentSource::Wsl {
-            distro: "Ubuntu".to_string(),
-        };
-        assert!(app.select_sessions_source("ssh remote --cli claude"));
-        assert_eq!(app.current_cli_filter(), Some(CliSource::Claude));
-        assert_eq!(app.current_agent_id, "copilot");
-        assert!(matches!(
-            app.current_agent_source,
-            crate::agent_source::AgentSource::Wsl { .. }
-        ));
-        assert!(master_rx.try_recv().is_err());
-
-        assert!(app.select_sessions_source(""));
-        assert_eq!(app.current_cli_filter(), Some(CliSource::Copilot));
-        assert_eq!(
-            app.current_location_filter(),
-            SessionLocation::Wsl {
-                distro: "Ubuntu".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn ssh_source_selection_preserves_agent_policy() {
-        let _locale = crate::test_support::lock_locale();
-        let mut app = test_app();
-        app.current_agent_id = "copilot".to_string();
-        app.host_agent_allowlist_present = true;
-        app.allowed_agent_ids = vec!["claude".to_string()];
-        assert!(!app.select_sessions_source("ssh remote"));
-        assert!(app.current_tab().agents_view.ssh_source.is_none());
-        assert!(!app.current_tab().messages.is_empty());
-    }
-
-    #[test]
-    fn ssh_slash_command_preserves_arguments_through_enter_dispatch() {
-        let _locale = crate::test_support::lock_locale();
-        let (mut app, mut master_rx) = test_app_with_master_rx();
-        app.current_agent_id = "copilot".to_string();
-        app.state = ConnectionState::Connected;
-        app.current_tab_mut()
-            .replace_input("/sessions ssh test-host -p 2222 --cli claude".to_string());
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let source = app.current_tab().agents_view.ssh_source.as_ref().unwrap();
-        assert_eq!(source.target.destination(), "test-host");
-        assert_eq!(source.target.port(), Some(2222));
-        assert_eq!(source.agent_id, "claude");
-        assert_eq!(app.current_tab().current_view, View::Agents);
-        assert!(master_rx.try_recv().is_err());
     }
 
     #[test]
@@ -471,45 +341,6 @@ impl App {
                     .allowed_agent_ids
                     .iter()
                     .any(|allowed| allowed.eq_ignore_ascii_case(agent_id)))
-    }
-
-    pub(super) fn select_sessions_source(&mut self, arguments: &str) -> bool {
-        let source = match parse_source(arguments, &self.current_agent_id) {
-            Ok(source) => source,
-            Err(error) => {
-                tracing::warn!(target: "ssh_sessions", %error, "invalid session source");
-                let message = format!("{}: {error}", t!("agents.status.error"));
-                self.current_tab_mut()
-                    .messages
-                    .push(ChatMessage::warning(message));
-                self.current_tab_mut().scroll_to_bottom();
-                return false;
-            }
-        };
-        if let Some(source) = &source {
-            if !self.ssh_sessions_agent_allowed(&source.agent_id) {
-                tracing::warn!(
-                    target: "ssh_sessions",
-                    agent_id = %source.agent_id,
-                    "SSH session agent is blocked by policy"
-                );
-                let message =
-                    t!("system.agent_unknown", agent = source.agent_id.as_str()).into_owned();
-                self.current_tab_mut()
-                    .messages
-                    .push(ChatMessage::warning(message));
-                return false;
-            }
-        }
-        let tab_id = self.active_tab_key().to_string();
-        self.cancel_ssh_sessions_fetch(&tab_id);
-        let tab = self.tab_mut(&tab_id);
-        tab.agents_view.ssh_source = source;
-        tab.agents_view.ssh_error = None;
-        tab.agents_view.snapshot = None;
-        tab.agents_view.focused_sid = None;
-        tab.agents_list_state.select(None);
-        true
     }
 
     pub(super) fn sessions_filters_for_tab(

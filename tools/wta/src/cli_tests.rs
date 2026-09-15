@@ -7,6 +7,69 @@ fn cli_schema_has_no_duplicate_short_flags() {
 }
 
 #[test]
+fn ssh_profile_helper_flags_preserve_target_port_and_initial_view() {
+    let cli = Cli::try_parse_from([
+        "wta",
+        "--sessions-ssh-target",
+        "yuazha@wsl-ssh",
+        "--sessions-ssh-port",
+        "2222",
+        "--initial-view",
+        "sessions",
+        "--owner-tab-id",
+        "owner-tab",
+        "--agent-source",
+        "host",
+    ])
+    .unwrap();
+    let config = helper_config(cli);
+    assert_eq!(
+        config.sessions_ssh_target.as_deref(),
+        Some("yuazha@wsl-ssh")
+    );
+    assert_eq!(config.sessions_ssh_port, Some(2222));
+    assert_eq!(config.owner_tab_id.as_deref(), Some("owner-tab"));
+    assert_eq!(config.initial_view, helper::config::InitialView::Sessions);
+    assert_eq!(config.agent_source.as_deref(), Some("host"));
+    assert!(config.sessions_ssh_error.is_none());
+}
+
+#[test]
+fn ssh_profile_helper_error_and_absent_flags_are_distinct() {
+    let config = helper_config(
+        Cli::try_parse_from(["wta", "--sessions-ssh-error", "unsupported profile"]).unwrap(),
+    );
+    assert_eq!(
+        config.sessions_ssh_error.as_deref(),
+        Some("unsupported profile")
+    );
+    assert!(config.sessions_ssh_target.is_none());
+    let config = helper_config(Cli::try_parse_from(["wta"]).unwrap());
+    assert!(config.sessions_ssh_target.is_none());
+    assert!(config.sessions_ssh_port.is_none());
+    assert!(config.sessions_ssh_error.is_none());
+    for args in [
+        vec!["wta", "--sessions-ssh-port", "22"],
+        vec![
+            "wta",
+            "--sessions-ssh-target",
+            "host",
+            "--sessions-ssh-port",
+            "0",
+        ],
+        vec![
+            "wta",
+            "--sessions-ssh-target",
+            "host",
+            "--sessions-ssh-error",
+            "bad",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
 fn split_pane_horizontal_uses_uppercase_short_flag() {
     let cli = Cli::try_parse_from(["wta", "split-pane", "-H"])
         .expect("split-pane -H must parse without colliding with help");

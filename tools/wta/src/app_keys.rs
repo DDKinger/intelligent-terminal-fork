@@ -101,7 +101,7 @@ impl App {
             return;
         }
         let ssh_sessions_view = self.current_tab().current_view == View::Agents
-            && self.current_tab().agents_view.ssh_source.is_some();
+            && self.current_tab().agents_view.is_ssh_source();
 
         // The source picker is also reachable from Setup when the configured
         // Windows agent is missing, so it must receive keys before the

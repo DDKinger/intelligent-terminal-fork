@@ -79,6 +79,7 @@ fn agent_command_on_enter(input: &str, selected: Option<&AvailableAgent>) -> Opt
 mod attachments;
 mod autofix;
 mod input_edit;
+mod ssh_profile;
 mod ssh_resume;
 mod ssh_session_view;
 mod tab_state;
@@ -3474,6 +3475,7 @@ impl App {
     }
 
     pub(crate) fn open_agents_view_for_tab(&mut self, tab_id: String) {
+        self.apply_profile_sessions_source(&tab_id);
         crate::telemetry::log_sessions_view_opened();
         {
             let tab = self.tab_mut(&tab_id);
@@ -3517,6 +3519,10 @@ impl App {
     }
 
     fn schedule_agents_refetch_for_tab(&mut self, tab_id: &str) {
+        self.apply_profile_sessions_source(tab_id);
+        if self.block_invalid_ssh_profile_refetch(tab_id) {
+            return;
+        }
         if self.tab_mut(tab_id).agents_view.ssh_source.is_some() {
             self.schedule_ssh_sessions_refetch(tab_id);
             return;
@@ -3552,7 +3558,7 @@ impl App {
         let tabs: Vec<String> = self
             .tab_sessions
             .iter()
-            .filter(|(_, tab)| tab.agents_view.ssh_source.is_none())
+            .filter(|(_, tab)| !tab.agents_view.is_ssh_source())
             .filter_map(|(id, tab)| tab.agents_view.snapshot.as_ref().map(|_| id.clone()))
             .collect();
         for tab_id in tabs {
@@ -3569,7 +3575,7 @@ impl App {
             .tab_sessions
             .iter()
             .filter_map(|(id, tab)| {
-                (tab.agents_view.ssh_source.is_none()
+                (!tab.agents_view.is_ssh_source()
                     && tab.agents_view.latest_request_id == Some(request_id))
                 .then(|| id.clone())
             })
@@ -3614,7 +3620,7 @@ impl App {
             .tab_sessions
             .iter()
             .filter_map(|(id, tab)| {
-                (tab.agents_view.ssh_source.is_none()
+                (!tab.agents_view.is_ssh_source()
                     && tab.agents_view.latest_request_id == Some(request_id))
                 .then(|| id.clone())
             })
@@ -3924,6 +3930,7 @@ impl App {
             self.emit_autofix_state_cleared(&active_tab_id);
         }
         self.proposal_channels.set_agent_transport_available(false);
+        self.refresh_profile_sessions_sources();
         self.state = ConnectionState::Connecting(t!("connection.starting").into_owned());
         self.publish_agent_status();
     }
@@ -6096,7 +6103,14 @@ impl App {
 
     /// `/sessions` — open the Agents picker for the active tab.
     fn cmd_sessions(&mut self, arguments: String) {
-        if !self.select_sessions_source(&arguments) {
+        if !arguments.trim().is_empty() {
+            tracing::warn!(target: "ssh_sessions", "sessions command does not accept source arguments");
+            let command = format!("/sessions {arguments}");
+            let tab = self.current_tab_mut();
+            tab.messages.push(ChatMessage::warning(
+                t!("system.unknown_command", command = command.as_str()).into_owned(),
+            ));
+            tab.scroll_to_bottom();
             return;
         }
         // Mirror the Ctrl+Shift+/ keybinding's open path: jump straight to

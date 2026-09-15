@@ -3069,6 +3069,7 @@ impl App {
                         "tab_changed event received"
                     );
                     if let Some(new_tab_id) = params.get("tab_id").and_then(|v| v.as_str()) {
+                        self.update_sessions_profile_from_event(&params);
                         // switch_tab_session calls project_active_tab_state
                         // at its end — that pushes the new tab's view AND
                         // autofix bar snapshot to C++ in one shot.
@@ -3433,6 +3434,8 @@ impl App {
                             return;
                         }
                     }
+
+                    self.update_sessions_profile_from_event(&params);
 
                     // Apply `view` if present.
                     if let Some(view_str) = params.get("view").and_then(|v| v.as_str()) {

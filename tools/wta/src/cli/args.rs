@@ -50,6 +50,17 @@ pub(crate) struct Cli {
     #[arg(long, hide = true)]
     pub(crate) agent_source_cwd: Option<String>,
 
+    /// SSH profile's history source, independent of the ACP chat backend.
+    #[arg(long, hide = true, conflicts_with = "sessions_ssh_error")]
+    pub(crate) sessions_ssh_target: Option<String>,
+
+    #[arg(long, hide = true, requires = "sessions_ssh_target", value_parser = clap::value_parser!(u16).range(1..))]
+    pub(crate) sessions_ssh_port: Option<u16>,
+
+    /// Unsupported SSH profile metadata must not fall back to local history.
+    #[arg(long, hide = true)]
+    pub(crate) sessions_ssh_error: Option<String>,
+
     /// Master-only allowlist of agent ids a helper may request over the
     /// pipe (the GPO-filtered set; built by TerminalPage::
     /// _BuildSharedWtaExtraArgs from `FilteredAcpAgents()`). The master
