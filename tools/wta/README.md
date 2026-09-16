@@ -105,8 +105,8 @@ not automatically change the Sessions source. Profile metadata is supplied
 when the helper starts, including prewarmed/stashed helpers, and refreshed by
 the owning tab's native Sessions/tab-change events.
 
-The view uses the same headerless list layout as local profiles, with connection
-errors still shown above the list. Use the existing search and arrow keys,
+The view uses the same list layout as local profiles, without an extra title row.
+Connection errors are still shown above the list. Use the existing search and arrow keys,
 **F5** to fetch remote history again, and **Enter** to open a native
 Terminal tab running the remote agent's own resume command in the session's
 remote working directory. The master fetches remote history on entry and
@@ -131,6 +131,8 @@ only the environment needed for Windows and SSH authentication, not inherited
 provider credentials or WTA routing data. A fixed terminal type overrides
 configured `SetEnv` values. Explicit login-shell startup output is sent to
 stderr so it cannot corrupt the ACP stream; login PATH setup is preserved.
+SSH escape commands are disabled, so the resume transport cannot add new
+forwarding channels interactively.
 
 `origin` and `status` are independent. Resuming from the Sessions view opens an
 ordinary SSH shell pane, not an ACP agent pane, so `origin` remains `Unknown`

@@ -145,6 +145,7 @@ fn ssh_arguments(target: &SshTarget, interactive: bool, script: &str) -> Vec<Str
         "StrictHostKeyChecking=yes",
         "ConnectTimeout=10",
         "ClearAllForwardings=yes",
+        "EscapeChar=none",
         "ForwardAgent=no",
         "ForwardX11=no",
         "PermitLocalCommand=no",
@@ -549,6 +550,7 @@ mod tests {
             "StrictHostKeyChecking=yes",
             "ConnectTimeout=10",
             "ClearAllForwardings=yes",
+            "EscapeChar=none",
             "ForwardAgent=no",
             "ForwardX11=no",
             "PermitLocalCommand=no",
@@ -738,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_child_scrubs_inherited_environment_and_revalidates_payload() {
+    fn resume_child_scrubs_inherited_environment_and_checks_payload() {
         let request = ResumeRequest {
             target: SshTarget::new("host", None).unwrap(),
             agent_id: "copilot".into(),
@@ -798,6 +800,7 @@ mod tests {
             );
             let config = String::from_utf8(output.stdout).unwrap();
             assert!(config.lines().any(|line| line == "sendenv *"));
+            assert!(config.lines().any(|line| line == "escapechar none"));
             assert_eq!(
                 config
                     .lines()
@@ -845,7 +848,7 @@ mod tests {
         assert!(!stdout.contains("banner"));
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "login-banner\nagent-diagnostic\n"
+            ["login-banner", "agent-diagnostic", ""].join("\n")
         );
     }
 

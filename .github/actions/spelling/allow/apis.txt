@@ -39,6 +39,7 @@ endfor
 ENDSESSION
 enumset
 environstrings
+escapechar
 EXACTSIZEONLY
 EXECUTEDEFAULT
 EXECUTEONLYONCE
@@ -70,6 +71,7 @@ hwinsta
 IAppearance
 ICONINFO
 IDirect
+identityfile
 IInheritable
 imm
 iosfwd
@@ -136,6 +138,7 @@ PICKFOLDERS
 PINPUT
 pmr
 PROGRAMDATA
+proxycommand
 QUERYENDSESSION
 rcx
 REGCLS
@@ -150,6 +153,7 @@ SACL
 schandle
 SEH
 semver
+sendenv
 serializer
 SETVERSION
 SHELLEXECUTEINFOW
