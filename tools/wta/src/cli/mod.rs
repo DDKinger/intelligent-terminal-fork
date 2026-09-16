@@ -12,6 +12,7 @@ use args::{Command, HooksAction, SessionsAction};
 
 pub(crate) async fn run(command: Command, json_mode: bool) -> Result<()> {
     match command {
+        Command::SshResume { payload } => crate::ssh_sessions::run_resume(&payload).await,
         command @ (Command::Info
         | Command::TestPipe
         | Command::ListWindows

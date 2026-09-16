@@ -113,7 +113,7 @@ namespace TerminalAppUnitTests
             L"Windows.Terminal.SSH",
             LR"("%SystemRoot%\System32\OpenSSH\ssh.exe" wsl-ssh)");
         VERIFY_IS_TRUE(source.kind == AgentSource::SessionsSshKind::ValidTarget,
-                       L"Generated SSH identity depends on namespace and commandline, not a renameable display name");
+                       L"Generated SSH identity depends on namespace and commandline, not the display name");
         VERIFY_ARE_EQUAL(std::wstring{ L"wsl-ssh" }, source.destination);
         VERIFY_IS_FALSE(source.port.has_value());
         VERIFY_IS_TRUE(source.error.empty());

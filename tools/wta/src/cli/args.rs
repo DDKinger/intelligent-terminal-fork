@@ -258,6 +258,12 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// Internal ConPTY launcher; not a session-picker entry point.
+    #[command(hide = true)]
+    SshResume {
+        #[arg(long, hide = true)]
+        payload: String,
+    },
     /// Show Windows Terminal protocol connection info
     Info,
     /// Test protocol connection to Windows Terminal
