@@ -66,6 +66,18 @@ namespace Microsoft::Terminal::AgentSource
                 }
                 value = value.substr(1, value.size() - 2);
             }
+            if (host)
+            {
+                if (const auto scope = value.find(L'%'); scope != std::wstring_view::npos)
+                {
+                    if (value.substr(0, scope).find(L':') == std::wstring_view::npos ||
+                        !IsSafeSshIdentityPart(value.substr(scope + 1), false))
+                    {
+                        return false;
+                    }
+                    value = value.substr(0, scope);
+                }
+            }
             return !value.empty() && value.front() != L'-' &&
                    std::all_of(value.begin(), value.end(), [host](const wchar_t ch) {
                        return (ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') ||

@@ -171,6 +171,9 @@ namespace TerminalAppUnitTests
             { L"ssh -p00022 server", L"server", 22 },
             { L"ssh -p2222 user@[::1]", L"user@[::1]", 2222 },
             { L"ssh user@::1", L"user@::1", 0 },
+            { L"ssh user@[fe80::1%eth0]", L"user@[fe80::1%eth0]", 0 },
+            { L"ssh -p2222 user@[fe80::1%12]", L"user@[fe80::1%12]", 2222 },
+            { L"ssh user@fe80::1%eth0", L"user@fe80::1%eth0", 0 },
         };
         for (const auto& test : cases)
         {
@@ -285,6 +288,11 @@ namespace TerminalAppUnitTests
                  L"ssh [::1",
                  L"ssh ::1]",
                  L"ssh user@[server]",
+                 L"ssh user@[fe80::1%]",
+                 L"ssh user@[fe80::1%eth0%other]",
+                 L"ssh user@[fe80::1%-scope]",
+                 L"ssh user@server%eth0",
+                 L"ssh user@[fe80::1%scope;command]",
                  L"ssh ssh://user@server",
              })
         {
@@ -322,7 +330,9 @@ namespace TerminalAppUnitTests
         VERIFY_ARE_EQUAL(std::wstring{ L"--sessions-ssh-error" }, errorArgs[0].first);
         VERIFY_ARE_EQUAL(unsupported.error, errorArgs[0].second);
 
-        for (const auto& source : { direct, alias, unsupported, AgentSource::SessionsSshSource{} })
+        const auto scoped = AgentSource::ResolveSessionsSshSource({}, L"ssh user@[fe80::1%12]");
+        VERIFY_IS_TRUE(scoped.kind == AgentSource::SessionsSshKind::ValidTarget);
+        for (const auto& source : { direct, alias, scoped, unsupported, AgentSource::SessionsSshSource{} })
         {
             const auto args = AgentSource::BuildSessionsSshHelperArguments(source);
             std::wstring commandline{ L"wta.exe" };
@@ -332,7 +342,8 @@ namespace TerminalAppUnitTests
                 QuoteAndEscapeCommandlineArg(value, commandline);
             }
             int argc = 0;
-            const wil::unique_hlocal_ptr<PWSTR[]> argv{ CommandLineToArgvW(commandline.c_str(), &argc) };
+            const auto expanded = wil::ExpandEnvironmentStringsW<std::wstring>(commandline.c_str());
+            const wil::unique_hlocal_ptr<PWSTR[]> argv{ CommandLineToArgvW(expanded.c_str(), &argc) };
             VERIFY_IS_NOT_NULL(argv.get());
             VERIFY_ARE_EQUAL(args.size() * 2 + 1, static_cast<size_t>(argc));
             for (size_t i = 0; i < args.size(); ++i)
