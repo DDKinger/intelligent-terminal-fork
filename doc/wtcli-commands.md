@@ -49,7 +49,8 @@ scripts) are not counted.
 An ordinary SSH tab (a generated SSH profile or a tab launched directly with
 `ssh.exe <alias>`) shows the workspace-style button at the upper left. Open it
 to list sessions on that SSH host's **default** tmux server, then select a row
-to attach in a new native window. No existing tmux frontend is required.
+to attach in a new native window, or focus the existing window for the same SSH
+destination, port, and session. No existing tmux frontend is required.
 Switching to a local tab hides the button; switching tabs or panes cancels a
 pending request so one host's results cannot appear under another host.
 User and port arguments (`-l` and `-p`) are retained. Put other connection
@@ -96,15 +97,19 @@ request is sent; omitted `--cwd` captures the caller's current directory.
 Empty values, control characters, and values exceeding the Windows commandline
 length limit are rejected.
 
-The request always creates a new native window; identical commandlines are not
-deduplicated. `wtcli` exits after window creation and does not own the backend's
-lifetime. A successful JSON response is:
+Structured `--ssh` requests and session-menu selections reuse an existing window
+for the same destination, port, and tmux session, including an attachment still
+connecting. Once connected, matching uses the current stable session ID/name,
+not the window caption or an old name. Failed, closing, or closed attachments
+are not reused. Opaque commandline requests still create independent windows.
+`wtcli` exits after the request and does not own the backend's lifetime. A
+successful JSON response is:
 
 ```json
 {"window_id": 2, "state": "starting"}
 ```
 
-`starting` acknowledges the new window, **not** a connected backend. Process or
+`starting` acknowledges the selected or newly created window, **not** a connected backend. Process or
 protocol startup failures are reported by the destination window. There is no
 automatic restart or reconnect. These transient windows are excluded from
 automatic layout/buffer persistence and named-workspace restoration.
@@ -129,8 +134,20 @@ visible in that tooltip.
 One control client maps its attached session to the native window, backend
 windows to tabs, and backend panes to terminal panes. Ordinary output, Unicode
 input, terminal mouse sequences, and paste use the single control stream.
+Tabs follow the backend's current `window_index` order, while permanent window
+IDs remain the routing identity. A client-local order subscription catches
+index-only swaps and renumbering without recreating panes, changing the selected
+backend window, or modifying remote configuration.
 The `+` button, new-tab action, directional split actions, keyboard pane resize,
 pane zoom, and individual pane/tab close commands operate on the backend.
+The existing tab rename editor and `renameTab` action rename the corresponding
+tmux **window** by its stable ID, not just a local title and not the tmux session.
+Names are literal, including Unicode, quotes, shell characters, and tmux format
+markers. The backend confirmation updates all attached native clients, and the
+name survives reattachment. Clearing the custom name restores automatic naming
+for that backend window; cancelling the editor leaves it unchanged.
+tmux's printable-name escaping (such as doubled backslashes) is displayed
+consistently; confirming an unchanged title does not rename it again.
 Closing the **native window** disconnects the frontend; it does not send
 `kill-session`, `kill-window`, or `kill-pane`. Whether processes survive is a
 property of the backend; a real tmux server normally keeps them running.
