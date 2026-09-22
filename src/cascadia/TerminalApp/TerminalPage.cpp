@@ -2693,7 +2693,7 @@ namespace winrt::TerminalApp::implementation
                                                       std::string_view state,
                                                       std::string_view tabId)
     {
-        if (paneId.empty() || (state != "closed" && state != "failed"))
+        if (paneId.empty() || (state != "closed" && state != "failed" && state != "detached"))
         {
             return false;
         }
@@ -2711,7 +2711,7 @@ namespace winrt::TerminalApp::implementation
             // binding that describes how to bring the CLI back.
             // `_NotifyPanesClosing` is what drops a binding when the pane
             // itself goes away.
-            if (state == "closed")
+            if (state == "closed" || state == "detached")
             {
                 _paneAgentSessions.erase(*paneSessionId);
             }
@@ -3169,17 +3169,19 @@ namespace winrt::TerminalApp::implementation
     // connection's own state machine drives the transition before the
     // revoker runs.
     //
+    // A detached tmux view clears only its local binding; it does not prove
+    // that the remote agent stopped.
     // Must be called BEFORE the destructive op (`pane->Close()`,
     // `tab.Shutdown()`) — once content is destroyed,
     // `GetTerminalControl()` returns null and the SessionId is
     // unresolvable.
-    void TerminalPage::_NotifyPanesClosing(const std::shared_ptr<Pane>& rootPane)
+    void TerminalPage::_NotifyPanesClosing(const std::shared_ptr<Pane>& rootPane, const bool detached)
     {
         if (!rootPane)
         {
             return;
         }
-        rootPane->WalkTree([this](const std::shared_ptr<Pane>& p) -> void {
+        rootPane->WalkTree([this, detached](const std::shared_ptr<Pane>& p) -> void {
             if (!p)
             {
                 return;
@@ -3198,7 +3200,8 @@ namespace winrt::TerminalApp::implementation
             {
                 return;
             }
-            const auto stateStr = control.ConnectionState() == ConnectionState::Failed ? "failed" : "closed";
+            const auto stateStr = detached ? "detached" : control.ConnectionState() == ConnectionState::Failed ? "failed" :
+                                                                                                                 "closed";
             _TryRaiseTerminalEndStateEvent(paneIdStr, stateStr);
             // This pane is going away for good, so its agent binding goes with
             // it — including the failed case that the call above deliberately
@@ -10580,6 +10583,11 @@ namespace winrt::TerminalApp::implementation
         return _tmuxSessionTitle.empty() ? winrt::hstring{ L"tmux" } : _tmuxSessionTitle;
     }
 
+    bool TerminalPage::MatchesTmuxSession(const winrt::hstring& session, const winrt::hstring& pendingSession) const
+    {
+        return _tmuxController ? _tmuxController->MatchesSession(session, pendingSession) : session == pendingSession;
+    }
+
     // Method Description:
     // - Handles the special case of providing a text override for the UI shortcut due to VK_OEM issue.
     //      Looks at the flags from the KeyChord modifiers and provides a concatenated string value of all
@@ -13849,6 +13857,7 @@ namespace winrt::TerminalApp::implementation
             request.TmuxCommandline(hstring{ commandline });
             request.TmuxSshDestination(context.destination);
             request.TmuxSshPort(context.port);
+            request.TmuxSshSession(hstring{ L"$" + std::to_wstring(id) });
             request.TmuxWorkingDirectory(workingDirectory);
             RequestNewWindow.raise(*this, request);
         }
